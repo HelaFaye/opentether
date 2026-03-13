@@ -1,0 +1,29 @@
+#!/bin/sh
+# /etc/hotplug.d/iface/99-opentether-route
+# Fires when the opentether interface comes up.
+# Pins the default route and system resolver after netifd finishes.
+
+[ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "opentether" ] || exit 0
+
+NAME="$(uci -q get opentether.tunnel.name || echo s5tun0)"
+MTU="$(uci -q get opentether.tunnel.mtu   || echo 1440)"
+
+logger -t opentether "Interface up — pinning routes and resolver (dev=$NAME mtu=$MTU)"
+
+ip link set dev "$NAME" mtu "$MTU"
+
+ip route add    default dev "$NAME" metric 10 2>/dev/null \
+    || ip route replace default dev "$NAME" metric 10
+
+ip -6 route add    default dev "$NAME" metric 10 2>/dev/null \
+    || ip -6 route replace default dev "$NAME" metric 10 2>/dev/null \
+    || logger -t opentether "IPv6 default route unavailable (IPv4-only upstream)"
+
+# Only overwrite resolv.conf if 127.0.0.1 isn't already listed
+if ! grep -q 'nameserver 127.0.0.1' /etc/resolv.conf 2>/dev/null; then
+    printf 'nameserver 127.0.0.1\nnameserver ::1\n' > /etc/resolv.conf
+fi
+
+echo f > /proc/net/nf_conntrack 2>/dev/null || true
+
+logger -t opentether "Routes and resolver pinned"

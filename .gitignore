@@ -1,0 +1,12 @@
+*.ipk
+*.apk
+*.o
+*.a
+build_dir/
+staging_dir/
+/bin/
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
