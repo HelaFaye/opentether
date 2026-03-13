@@ -1,0 +1,183 @@
+#!/bin/sh
+# /usr/lib/opentether/setup.sh
+# Called by postinst (install), prerm (remove), and the LuCI save handler (apply).
+# Usage: setup.sh install | setup.sh remove | setup.sh apply
+
+YAML=/etc/hev-socks5-tunnel/main.yml
+YAML_BACKUP=/etc/hev-socks5-tunnel/main.yml.pre-opentether
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+uget() { uci -q get "opentether.$1" 2>/dev/null; }
+bool() { [ "$1" = "1" ] && echo "true" || echo "false"; }
+opt()  { [ -n "$2" ] && [ "$2" != "0" ] && printf "  %s: %s\n" "$1" "$2"; }
+optq() { [ -n "$2" ] && printf "  %s: '%s'\n" "$1" "$2"; }
+
+# ── Generate YAML from current UCI values ─────────────────────────────────────
+# IMPORTANT: This function must stay in sync with buildYaml() in the LuCI
+# main.js view. If you add or change a field here, update main.js too.
+generate_yaml() {
+    [ -f "$YAML" ] || return 1
+
+    cat > "$YAML" << YAML
+tunnel:
+  name: $(uget tunnel.name || echo s5tun0)
+  mtu: $(uget tunnel.mtu || echo 1440)
+  multi-queue: $(bool "$(uget tunnel.multi_queue)")
+  ipv4: $(uget tunnel.ipv4 || echo 198.18.0.1)
+  ipv6: '$(uget tunnel.ipv6 || echo fc00::1)'
+$(optq "post-up-script"  "$(uget tunnel.post_up_script)")
+$(optq "pre-down-script" "$(uget tunnel.pre_down_script)")
+
+socks5:
+  port: $(uget socks5.port || echo 1088)
+  address: $(uget socks5.address || echo 127.0.0.1)
+  udp: '$(uget socks5.udp || echo tcp)'
+$(optq "udp-address" "$(uget socks5.udp_address)")
+$([ "$(uget socks5.pipeline)" = "1" ] && echo "  pipeline: true" || true)
+$(optq "username" "$(uget socks5.username)")
+$(optq "password" "$(uget socks5.password)")
+$(opt  "mark"     "$(uget socks5.mark)")
+
+mapdns:
+  address: $(uget mapdns.address || echo 127.0.0.1)
+  port: $(uget mapdns.port || echo 1088)
+  network: $(uget mapdns.network || echo 100.64.0.0)
+  netmask: $(uget mapdns.netmask || echo 255.192.0.0)
+  cache-size: $(uget mapdns.cache_size || echo 10000)
+
+misc:
+  task-stack-size: $(uget misc.task_stack_size || echo 86016)
+  tcp-buffer-size: $(uget misc.tcp_buffer_size || echo 65536)
+  udp-recv-buffer-size: $(uget misc.udp_recv_buffer_size || echo 524288)
+$(opt  "udp-copy-buffer-nums"    "$(uget misc.udp_copy_buffer_nums)")
+$(opt  "max-session-count"       "$(uget misc.max_session_count)")
+$(opt  "connect-timeout"         "$(uget misc.connect_timeout)")
+$(opt  "tcp-read-write-timeout"  "$(uget misc.tcp_rw_timeout)")
+$(opt  "udp-read-write-timeout"  "$(uget misc.udp_rw_timeout)")
+$(optq "log-file"                "$(uget misc.log_file)")
+$(optq "log-level"               "$(uget misc.log_level)")
+$(optq "pid-file"                "$(uget misc.pid_file)")
+$(opt  "limit-nofile"            "$(uget misc.limit_nofile)")
+YAML
+}
+
+case "$1" in
+install)
+    # Detect upgrade vs fresh install.
+    # On upgrade the UCI config already exists — skip service restarts to avoid
+    # disrupting active connections. Just regenerate the YAML and patch UCI.
+    FRESH=1
+    uci -q get opentether.tunnel >/dev/null 2>&1 && FRESH=0
+
+    [ -f "$YAML_BACKUP" ] || cp "$YAML" "$YAML_BACKUP" 2>/dev/null || true
+
+    generate_yaml
+
+    if [ "$FRESH" = "1" ]; then
+        # ── Network interface ─────────────────────────────────────────────────
+        uci -q delete network.opentether || true
+        uci set network.opentether=interface
+        uci set network.opentether.proto='static'
+        uci set network.opentether.device="$(uget tunnel.name || echo s5tun0)"
+        uci set network.opentether.ipaddr="$(uget tunnel.ipv4 || echo 198.18.0.1)"
+        uci set network.opentether.netmask='255.255.255.255'
+        uci set network.opentether.ip6addr='fc00::1/128'
+        uci set network.opentether.metric='10'
+        uci add_list network.opentether.dns='1.1.1.1'
+        uci add_list network.opentether.dns='2606:4700:4700::1111'
+        uci commit network
+
+        # ── Firewall zone ─────────────────────────────────────────────────────
+        uci -q delete firewall.opentether_zone || true
+        uci set firewall.opentether_zone=zone
+        uci set firewall.opentether_zone.name='opentether'
+        uci set firewall.opentether_zone.network='opentether'
+        uci set firewall.opentether_zone.input='REJECT'
+        uci set firewall.opentether_zone.output='ACCEPT'
+        uci set firewall.opentether_zone.forward='REJECT'
+        uci set firewall.opentether_zone.masq='1'
+        uci set firewall.opentether_zone.ip6masq='1'
+        uci set firewall.opentether_zone.mtu_fix='1'
+
+        uci -q delete firewall.opentether_forward || true
+        uci set firewall.opentether_forward=forwarding
+        uci set firewall.opentether_forward.src='lan'
+        uci set firewall.opentether_forward.dest='opentether'
+        uci commit firewall
+
+        # ── DNS ───────────────────────────────────────────────────────────────
+        uci -q delete dhcp.@dnsmasq[0].server || true
+        uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
+        uci add_list dhcp.@dnsmasq[0].server='2606:4700:4700::1111'
+        uci set dhcp.@dnsmasq[0].noresolv='1'
+        uci set dhcp.@dnsmasq[0].localservice='0'
+        uci commit dhcp
+
+        /etc/init.d/opentether enable
+        /etc/init.d/network restart
+        /etc/init.d/firewall restart
+        /etc/init.d/dnsmasq restart
+
+        echo "OpenTether installed. Plug in your phone and approve USB debugging."
+    else
+        # Upgrade — YAML already regenerated above, just reload the tunnel
+        /etc/init.d/opentether restart
+        echo "OpenTether upgraded."
+    fi
+    ;;
+
+apply)
+    generate_yaml
+    # Update network interface device/IP in case they changed
+    uci set network.opentether.device="$(uget tunnel.name || echo s5tun0)"
+    uci set network.opentether.ipaddr="$(uget tunnel.ipv4 || echo 198.18.0.1)"
+    uci commit network
+    # Stop tunnel first so it doesn't respawn against a dead interface
+    /etc/init.d/opentether stop
+    # Flush conntrack so stale sessions don't persist through the restart
+    echo f > /proc/net/nf_conntrack 2>/dev/null || true
+    # Bounce only the opentether interface — avoids disrupting WAN and LuCI
+    ifdown opentether 2>/dev/null; ifup opentether 2>/dev/null
+    # Start tunnel after interface is back up
+    /etc/init.d/opentether start
+    ;;
+
+remove)
+    # Kill watchdog if running
+    if [ -f /tmp/opentether-hotplug.pid ]; then
+        kill "$(cat /tmp/opentether-hotplug.pid)" 2>/dev/null
+        rm -f /tmp/opentether-hotplug.pid
+    fi
+    rm -rf /tmp/opentether.lock
+
+    /etc/init.d/opentether stop    2>/dev/null
+    /etc/init.d/opentether disable 2>/dev/null
+
+    adb forward --remove-all 2>/dev/null || true
+
+    [ -f "$YAML_BACKUP" ] && mv "$YAML_BACKUP" "$YAML"
+
+    uci -q delete network.opentether       || true
+    uci commit network
+    uci -q delete firewall.opentether_zone    || true
+    uci -q delete firewall.opentether_forward || true
+    uci commit firewall
+    uci -q delete dhcp.@dnsmasq[0].server || true
+    uci set dhcp.@dnsmasq[0].noresolv='0'
+    uci set dhcp.@dnsmasq[0].localservice='1'
+    uci commit dhcp
+
+    rm -f /etc/resolv.conf
+
+    /etc/init.d/network restart
+    /etc/init.d/firewall restart
+    /etc/init.d/dnsmasq restart
+    ;;
+
+*)
+    echo "Usage: $0 install|apply|remove" >&2
+    exit 1
+    ;;
+esac
+
+exit 0
