@@ -53,9 +53,9 @@ ssh root@192.168.1.1 "opkg install /tmp/opentether-*.ipk"
 ```
 
 
-## Phone setup
+## Android setup
 
-Install [Socks5](https://github.com/heiher/socks5) on your Android phone and configure it to listen on port 1088 (or whatever port you configure in OpenTether). It's a lightweight SOCKS5 server by the same author as hev-socks5-tunnel. Enable USB debugging in Developer Options, plug into the router, and approve the debug prompt.
+Install [Socks5](https://github.com/heiher/socks5) on your Android device and configure it to listen on port 1088 (or whatever port you configure in OpenTether). It's a lightweight SOCKS5 server by the same author as hev-socks5-tunnel. Enable USB debugging in Developer Options, plug into the router, and approve the debug prompt.
 
 
 ## Headless configuration (UCI)
