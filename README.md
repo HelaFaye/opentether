@@ -1,18 +1,18 @@
 # OpenTether
 
-Uses your Android phone's internet connection as a router WAN via USB tethering over ADB and SOCKS5.
+Uses your Android device's internet connection as a router WAN via USB tethering over ADB and SOCKS5.
 
-Plug in your phone → approve USB debugging → internet works. No app required beyond any SOCKS5 proxy app on the phone.
+Plug in your Android device → approve USB debugging → internet works. No app required beyond any SOCKS5 proxy app on the phone.
 
 ## How it works
 
-1. Phone is plugged into router USB
+1. Android device is plugged into router USB
 2. USB hotplug fires, `adb start-server` runs
-3. Phone shows "Allow USB debugging?" — user approves
+3. Android device shows "Allow USB debugging?" — user approves
 4. `adb forward tcp:1088 tcp:1088` tunnels the proxy to localhost
 5. `hev-socks5-tunnel` creates `s5tun0` virtual interface
 6. Default route and DNS are pinned through the tunnel
-7. All LAN clients use the phone's internet connection
+7. All LAN clients use the device's internet connection
 
 ## Packages
 
