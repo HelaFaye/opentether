@@ -8,10 +8,9 @@ _serial_from_adb() {
 
 _port_for_serial() {
     local serial="$1"
-    # Find the UCI device section matching this serial
     local cfg
     cfg=$(uci show opentether 2>/dev/null | \
-          awk -F= '/\.serial=/{gsub(/'\''/, "", $2); if ($2 == "'"$serial"'") {split($1,a,"."); print a[2]}}' | head -1)
+          awk -F= -v s="$serial" '/[.]serial=/{v=$2; gsub(/\x27/,"",v); if(v==s){split($1,a,"."); print a[2]}}' | head -1)
     [ -n "$cfg" ] && uci -q get "opentether.${cfg}.port" && return
     echo ""
 }
@@ -33,18 +32,21 @@ if [ "$ACTION" = "remove" ]; then
         [ -f "$pidfile" ] || continue
         serial="${pidfile#/tmp/opentether-watchdog-}"
         serial="${serial%.pid}"
-        # Check if device is still connected
-        if ! adb -s "$serial" get-state 2>/dev/null | grep -q "^device$"; then
-            logger -t opentether "[$serial] USB removed — cleaning up"
-            kill "$(cat $pidfile)" 2>/dev/null
-            rm -f "$pidfile"
-            rm -rf "/tmp/opentether-${serial}.lock"
-            adb -s "$serial" forward --remove-all 2>/dev/null || true
-            # Stop just this device's tunnel instance via ubus
-            ubus call service set "{\"name\":\"opentether\",\"instances\":{\"${serial}\":{\"action\":\"stop\"}}}" 2>/dev/null || true
-            # Remove the PID file so LuCI shows Stopped
-            rm -f "/tmp/opentether-tunnel-${serial}.pid"
+        # Skip if device is still genuinely connected (not cached)
+        # Use get-state twice with a brief gap to defeat adb server caching
+        state1="$(adb -s "$serial" get-state 2>/dev/null)"
+        sleep 1
+        state2="$(adb -s "$serial" get-state 2>/dev/null)"
+        if [ "$state1" = "device" ] && [ "$state2" = "device" ]; then
+            continue
         fi
+        logger -t opentether "[$serial] USB removed — cleaning up"
+        kill "$(cat $pidfile)" 2>/dev/null
+        rm -f "$pidfile"
+        rm -rf "/tmp/opentether-${serial}.lock"
+        adb -s "$serial" forward --remove-all 2>/dev/null || true
+        ubus call service set '{"name":"opentether","instances":{"'"$serial"'":{"action":"stop"}}}' 2>/dev/null || true
+        rm -f "/tmp/opentether-tunnel-${serial}.pid"
     done
     exit 0
 fi

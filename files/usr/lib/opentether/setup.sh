@@ -195,13 +195,12 @@ apply_device() {
     uci set "network.ot_${serial}.metric=${metric}"
     uci commit network
 
-    # Ensure firewall zone and forwarding exist for this device
+    # Ensure firewall zone and forwarding exist and are up to date
     local zone="ot_zone_${serial}"
     local fwd="ot_fwd_${serial}"
+    local fw_changed=0
     if ! uci -q get "firewall.${zone}" >/dev/null 2>&1; then
         uci set "firewall.${zone}=zone"
-        uci set "firewall.${zone}.name=ot_${serial}"
-        uci set "firewall.${zone}.network=ot_${serial}"
         uci set "firewall.${zone}.input=REJECT"
         uci set "firewall.${zone}.output=ACCEPT"
         uci set "firewall.${zone}.forward=REJECT"
@@ -211,9 +210,13 @@ apply_device() {
         uci set "firewall.${fwd}=forwarding"
         uci set "firewall.${fwd}.src=lan"
         uci set "firewall.${fwd}.dest=ot_${serial}"
-        uci commit firewall
-        /etc/init.d/firewall restart
+        fw_changed=1
     fi
+    # Always update name and network in case iface was renamed
+    uci set "firewall.${zone}.name=ot_${serial}"
+    uci set "firewall.${zone}.network=ot_${serial}"
+    uci commit firewall
+    [ "$fw_changed" = "1" ] && /etc/init.d/firewall restart || /etc/init.d/firewall reload
 
     echo f > /proc/net/nf_conntrack 2>/dev/null || true
 
@@ -260,9 +263,8 @@ remove_device() {
     # Remove UCI device section
     [ -n "$cfg" ] && { uci -q delete "opentether.${cfg}" || true; uci commit opentether || true; }
 
-    # Reload only what's needed — full network restart kills LuCI connection
     /etc/init.d/opentether restart
-    /etc/init.d/firewall reload 2>/dev/null || /etc/init.d/firewall restart
+    /etc/init.d/firewall restart
 
     logger -t opentether "[$serial] removed"
 }
