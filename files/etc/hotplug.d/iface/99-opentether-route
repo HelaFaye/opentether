@@ -1,29 +1,38 @@
 #!/bin/sh
 # /etc/hotplug.d/iface/99-opentether-route
-# Fires when the opentether interface comes up.
-# Pins the default route and system resolver after netifd finishes.
+# Handles ifup and ifdown for ot_* interfaces.
 
-[ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "opentether" ] || exit 0
+# Only handle ot_* interfaces
+case "$INTERFACE" in
+    ot_*) ;;
+    *) exit 0 ;;
+esac
 
-NAME="$(uci -q get opentether.tunnel.name || echo s5tun0)"
-MTU="$(uci -q get opentether.tunnel.mtu   || echo 1440)"
+SERIAL="${INTERFACE#ot_}"
+# UCI section name is always device_<serial> (enforced by setup.sh add-device)
+MTU="$(uci -q get opentether.device_${SERIAL}.mtu    || echo 1440)"
+METRIC="$(uci -q get opentether.device_${SERIAL}.metric || echo 10)"
+IFACE="$(uci -q get opentether.device_${SERIAL}.iface  || echo s5tun0)"
 
-logger -t opentether "Interface up — pinning routes and resolver (dev=$NAME mtu=$MTU)"
+if [ "$ACTION" = "ifup" ]; then
+    logger -t opentether "[$SERIAL] Interface up — pinning routes (dev=$IFACE mtu=$MTU metric=$METRIC)"
 
-ip link set dev "$NAME" mtu "$MTU"
+    ip link set dev "$IFACE" mtu "$MTU" 2>/dev/null
 
-ip route add    default dev "$NAME" metric 10 2>/dev/null \
-    || ip route replace default dev "$NAME" metric 10
+    ip route add    default dev "$IFACE" metric "$METRIC" 2>/dev/null \
+        || ip route replace default dev "$IFACE" metric "$METRIC"
 
-ip -6 route add    default dev "$NAME" metric 10 2>/dev/null \
-    || ip -6 route replace default dev "$NAME" metric 10 2>/dev/null \
-    || logger -t opentether "IPv6 default route unavailable (IPv4-only upstream)"
+    ip -6 route add    default dev "$IFACE" metric "$METRIC" 2>/dev/null \
+        || ip -6 route replace default dev "$IFACE" metric "$METRIC"
 
-# Only overwrite resolv.conf if 127.0.0.1 isn't already listed
-if ! grep -q 'nameserver 127.0.0.1' /etc/resolv.conf 2>/dev/null; then
-    printf 'nameserver 127.0.0.1\nnameserver ::1\n' > /etc/resolv.conf
+    if ! grep -q "127.0.0.1" /etc/resolv.conf 2>/dev/null; then
+        printf 'nameserver 127.0.0.1\nnameserver ::1\n' > /etc/resolv.conf
+    fi
+
+    logger -t opentether "[$SERIAL] Routes and resolver pinned"
+
+elif [ "$ACTION" = "ifdown" ]; then
+    logger -t opentether "[$SERIAL] Interface down — removing routes"
+    ip route del default dev "$IFACE" 2>/dev/null || true
+    ip -6 route del default dev "$IFACE" 2>/dev/null || true
 fi
-
-echo f > /proc/net/nf_conntrack 2>/dev/null || true
-
-logger -t opentether "Routes and resolver pinned"

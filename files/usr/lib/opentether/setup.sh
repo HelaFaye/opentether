@@ -1,183 +1,387 @@
 #!/bin/sh
 # /usr/lib/opentether/setup.sh
-# Called by postinst (install), prerm (remove), and the LuCI save handler (apply).
-# Usage: setup.sh install | setup.sh remove | setup.sh apply
+# Subcommands:
+#   install              — fresh install / upgrade
+#   add-device <serial>  — register a new device, create UCI + YAML + network + firewall
+#   remove-device <serial> — tear down a device's config
+#   apply <serial>       — regenerate YAML, bounce interface, restart tunnel instance
+#   remove               — full uninstall
 
-YAML=/etc/hev-socks5-tunnel/main.yml
-YAML_BACKUP=/etc/hev-socks5-tunnel/main.yml.pre-opentether
+YAML_DIR=/etc/hev-socks5-tunnel/devices
+YAML_BACKUP_DIR=/etc/hev-socks5-tunnel/backup
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-uget() { uci -q get "opentether.$1" 2>/dev/null; }
-bool() { [ "$1" = "1" ] && echo "true" || echo "false"; }
-opt()  { [ -n "$2" ] && [ "$2" != "0" ] && printf "  %s: %s\n" "$1" "$2"; }
-optq() { [ -n "$2" ] && printf "  %s: '%s'\n" "$1" "$2"; }
+# ── Helpers ────────────────────────────────────────────────────────────────────
+uget()  { uci -q get "opentether.$1" 2>/dev/null; }
+dget()  { uci -q get "opentether.$1.$2" 2>/dev/null; }  # device section getter
+bool()  { [ "$1" = "1" ] && echo "true" || echo "false"; }
+opt()   { [ -n "$2" ] && [ "$2" != "0" ] && printf "  %s: %s\n" "$1" "$2"; }
+optq()  { [ -n "$2" ] && printf "  %s: '%s'\n" "$1" "$2"; }
 
-# ── Generate YAML from current UCI values ─────────────────────────────────────
+# Find the UCI section name for a given serial
+_cfg_for_serial() {
+    local serial="$1"
+    uci show opentether 2>/dev/null | \
+    awk -F= '/\.serial=/{gsub(/'\''/, "", $2); if ($2 == "'"$serial"'") {split($1,a,"."); print a[2]}}' | head -1
+}
+
+# Get next available port starting from 1088 (only checks device sections)
+_next_port() {
+    local port=1088
+    while uci show opentether 2>/dev/null | awk -F= '/=device$/{sec=$1} /\.port=/{if(sec) print}' | grep -q "'${port}'"; do
+        port=$((port + 1))
+    done
+    echo $port
+}
+
+# Get next available interface index
+_next_iface_idx() {
+    local idx=0
+    while uci show opentether 2>/dev/null | grep -q "\.iface='s5tun${idx}'"; do
+        idx=$((idx + 1))
+    done
+    echo $idx
+}
+
+# ── YAML generation ────────────────────────────────────────────────────────────
 # IMPORTANT: This function must stay in sync with buildYaml() in the LuCI
 # main.js view. If you add or change a field here, update main.js too.
 generate_yaml() {
-    [ -f "$YAML" ] || return 1
+    local serial="$1"
+    local cfg
+    cfg=$(_cfg_for_serial "$serial")
+    [ -n "$cfg" ] || { echo "ERROR: no config for $serial" >&2; return 1; }
 
-    cat > "$YAML" << YAML
-tunnel:
-  name: $(uget tunnel.name || echo s5tun0)
-  mtu: $(uget tunnel.mtu || echo 1440)
-  multi-queue: $(bool "$(uget tunnel.multi_queue)")
-  ipv4: $(uget tunnel.ipv4 || echo 198.18.0.1)
-  ipv6: '$(uget tunnel.ipv6 || echo fc00::1)'
-$(optq "post-up-script"  "$(uget tunnel.post_up_script)")
-$(optq "pre-down-script" "$(uget tunnel.pre_down_script)")
+    local port   iface  ipv4   ipv6   mtu    mq
+    local s5addr s5udp  pipeline
+    local md_addr md_port md_network md_netmask md_cache
+    local stack  buf    udp_buf
 
-socks5:
-  port: $(uget socks5.port || echo 1088)
-  address: $(uget socks5.address || echo 127.0.0.1)
-  udp: '$(uget socks5.udp || echo tcp)'
-$(optq "udp-address" "$(uget socks5.udp_address)")
-$([ "$(uget socks5.pipeline)" = "1" ] && echo "  pipeline: true" || true)
-$(optq "username" "$(uget socks5.username)")
-$(optq "password" "$(uget socks5.password)")
-$(opt  "mark"     "$(uget socks5.mark)")
+    port="$(dget $cfg port         || echo 1088)"
+    iface="$(dget $cfg iface       || echo s5tun0)"
+    ipv4="$(dget $cfg ipv4         || echo 198.18.0.1)"
+    ipv6="$(dget $cfg ipv6         || echo fc00::1)"
+    mtu="$(dget $cfg mtu           || echo 1440)"
+    mq="$(dget $cfg multi_queue    || echo 0)"
+    s5addr="$(dget $cfg s5_address || echo 127.0.0.1)"
+    s5udp="$(dget $cfg s5_udp      || echo tcp)"
+    pipeline="$(dget $cfg s5_pipeline || echo 0)"
+    md_addr="$(dget $cfg md_address   || echo 127.0.0.1)"
+    md_port="$(dget $cfg md_port      || echo $port)"
+    md_network="$(dget $cfg md_network  || echo 100.64.0.0)"
+    md_netmask="$(dget $cfg md_netmask  || echo 255.192.0.0)"
+    md_cache="$(dget $cfg md_cache_size || echo 10000)"
+    stack="$(dget $cfg task_stack_size  || echo 86016)"
+    buf="$(dget $cfg tcp_buffer_size    || echo 65536)"
+    udp_buf="$(dget $cfg udp_recv_buffer_size || echo 524288)"
 
-mapdns:
-  address: $(uget mapdns.address || echo 127.0.0.1)
-  port: $(uget mapdns.port || echo 1088)
-  network: $(uget mapdns.network || echo 100.64.0.0)
-  netmask: $(uget mapdns.netmask || echo 255.192.0.0)
-  cache-size: $(uget mapdns.cache_size || echo 10000)
-
-misc:
-  task-stack-size: $(uget misc.task_stack_size || echo 86016)
-  tcp-buffer-size: $(uget misc.tcp_buffer_size || echo 65536)
-  udp-recv-buffer-size: $(uget misc.udp_recv_buffer_size || echo 524288)
-$(opt  "udp-copy-buffer-nums"    "$(uget misc.udp_copy_buffer_nums)")
-$(opt  "max-session-count"       "$(uget misc.max_session_count)")
-$(opt  "connect-timeout"         "$(uget misc.connect_timeout)")
-$(opt  "tcp-read-write-timeout"  "$(uget misc.tcp_rw_timeout)")
-$(opt  "udp-read-write-timeout"  "$(uget misc.udp_rw_timeout)")
-$(optq "log-file"                "$(uget misc.log_file)")
-$(optq "log-level"               "$(uget misc.log_level)")
-$(optq "pid-file"                "$(uget misc.pid_file)")
-$(opt  "limit-nofile"            "$(uget misc.limit_nofile)")
-YAML
+    mkdir -p "$YAML_DIR"
+    # Build YAML via printf to avoid blank lines from empty opt/optq calls
+    {
+        printf 'tunnel:\n'
+        printf '  name: %s\n' "${iface}"
+        printf '  mtu: %s\n' "${mtu}"
+        printf '  multi-queue: %s\n' "$(bool "$mq")"
+        printf '  ipv4: %s\n' "${ipv4}"
+        printf "  ipv6: '%s'\n" "${ipv6}"
+        [ -n "$(dget $cfg post_up_script)" ]  && printf "  post-up-script: '%s'\n"  "$(dget $cfg post_up_script)"
+        [ -n "$(dget $cfg pre_down_script)" ] && printf "  pre-down-script: '%s'\n" "$(dget $cfg pre_down_script)"
+        printf '\n'
+        printf 'socks5:\n'
+        printf '  port: %s\n' "${port}"
+        printf '  address: %s\n' "${s5addr}"
+        printf "  udp: '%s'\n" "${s5udp}"
+        [ -n "$(dget $cfg s5_udp_address)" ] && printf "  udp-address: '%s'\n" "$(dget $cfg s5_udp_address)"
+        [ "$pipeline" = "1" ] && printf '  pipeline: true\n'
+        [ -n "$(dget $cfg s5_username)" ] && printf "  username: '%s'\n" "$(dget $cfg s5_username)"
+        [ -n "$(dget $cfg s5_password)" ] && printf "  password: '%s'\n" "$(dget $cfg s5_password)"
+        local mark; mark="$(dget $cfg s5_mark)"
+        [ -n "$mark" ] && [ "$mark" != "0" ] && printf '  mark: %s\n' "$mark"
+        printf '\n'
+        printf 'mapdns:\n'
+        printf '  address: %s\n' "${md_addr}"
+        printf '  port: %s\n' "${md_port}"
+        printf '  network: %s\n' "${md_network}"
+        printf '  netmask: %s\n' "${md_netmask}"
+        printf '  cache-size: %s\n' "${md_cache}"
+        printf '\n'
+        printf 'misc:\n'
+        printf '  task-stack-size: %s\n' "${stack}"
+        printf '  tcp-buffer-size: %s\n' "${buf}"
+        printf '  udp-recv-buffer-size: %s\n' "${udp_buf}"
+        local v
+        v="$(dget $cfg udp_copy_buffer_nums)"; [ -n "$v" ] && [ "$v" != "0" ] && printf '  udp-copy-buffer-nums: %s\n' "$v"
+        v="$(dget $cfg max_session_count)";    [ -n "$v" ] && [ "$v" != "0" ] && printf '  max-session-count: %s\n' "$v"
+        v="$(dget $cfg connect_timeout)";      [ -n "$v" ] && printf '  connect-timeout: %s\n' "$v"
+        v="$(dget $cfg tcp_rw_timeout)";       [ -n "$v" ] && printf '  tcp-read-write-timeout: %s\n' "$v"
+        v="$(dget $cfg udp_rw_timeout)";       [ -n "$v" ] && printf '  udp-read-write-timeout: %s\n' "$v"
+        v="$(dget $cfg log_file)";             [ -n "$v" ] && printf "  log-file: '%s'\n" "$v"
+        v="$(dget $cfg log_level)";            [ -n "$v" ] && [ "$v" != "warn" ] && printf "  log-level: '%s'\n" "$v"
+        v="$(dget $cfg pid_file)";             [ -n "$v" ] && printf "  pid-file: '%s'\n" "$v"
+        v="$(dget $cfg limit_nofile)";         [ -n "$v" ] && [ "$v" != "0" ] && printf '  limit-nofile: %s\n' "$v"
+    } > "${YAML_DIR}/${serial}.yml" 
+    logger -t opentether "[$serial] YAML generated: ${YAML_DIR}/${serial}.yml"
 }
 
-case "$1" in
-install)
-    # Detect upgrade vs fresh install.
-    # On upgrade the UCI config already exists — skip service restarts to avoid
-    # disrupting active connections. Just regenerate the YAML and patch UCI.
-    FRESH=1
-    uci -q get opentether.tunnel >/dev/null 2>&1 && FRESH=0
+# ── Add device ─────────────────────────────────────────────────────────────────
+add_device() {
+    local serial="$1"
+    local name="$2"   # optional friendly name (e.g. from ro.product.model)
+    [ -n "$serial" ] || { echo "Usage: $0 add-device <serial> [name]" >&2; exit 1; }
 
-    [ -f "$YAML_BACKUP" ] || cp "$YAML" "$YAML_BACKUP" 2>/dev/null || true
+    # Idempotent — don't duplicate
+    if [ -n "$(_cfg_for_serial "$serial")" ]; then
+        echo "Device $serial already configured" >&2
+        return 0
+    fi
 
-    generate_yaml
+    local port idx iface ipv4 ipv6
+    port=$(_next_port)
+    idx=$(_next_iface_idx)
+    iface="s5tun${idx}"
+    ipv4="198.18.${idx}.1"
+    ipv6="fc$(printf '%02x' $((idx + 0)))::1"
+    # Keep IPs in valid ranges
+    [ "$idx" -gt 0 ] && ipv4="198.18.${idx}.1"
 
-    if [ "$FRESH" = "1" ]; then
-        # ── Network interface ─────────────────────────────────────────────────
-        uci -q delete network.opentether || true
-        uci set network.opentether=interface
-        uci set network.opentether.proto='static'
-        uci set network.opentether.device="$(uget tunnel.name || echo s5tun0)"
-        uci set network.opentether.ipaddr="$(uget tunnel.ipv4 || echo 198.18.0.1)"
-        uci set network.opentether.netmask='255.255.255.255'
-        uci set network.opentether.ip6addr='fc00::1/128'
-        uci set network.opentether.metric='10'
-        uci add_list network.opentether.dns='1.1.1.1'
-        uci add_list network.opentether.dns='2606:4700:4700::1111'
-        uci commit network
+    # Create UCI device section
+    local section="device_${serial}"
+    uci set "opentether.${section}=device"
+    uci set "opentether.${section}.serial=${serial}"
+    [ -n "$name" ] && uci set "opentether.${section}.name=${name}"
+    uci set "opentether.${section}.enabled=0"   # disabled until user configures and saves
+    uci set "opentether.${section}.port=${port}"
+    uci set "opentether.${section}.iface=${iface}"
+    uci set "opentether.${section}.mtu=1440"
+    uci set "opentether.${section}.ipv4=${ipv4}"
+    uci set "opentether.${section}.ipv6=${ipv6}"
+    uci set "opentether.${section}.metric=10"
+    uci set "opentether.${section}.s5_address=127.0.0.1"
+    uci set "opentether.${section}.s5_udp=tcp"
+    uci set "opentether.${section}.md_address=127.0.0.1"
+    uci set "opentether.${section}.md_port=${port}"
+    uci set "opentether.${section}.md_network=100.64.0.0"
+    uci set "opentether.${section}.md_netmask=255.192.0.0"
+    uci set "opentether.${section}.md_cache_size=10000"
+    uci set "opentether.${section}.task_stack_size=86016"
+    uci set "opentether.${section}.tcp_buffer_size=65536"
+    uci set "opentether.${section}.udp_recv_buffer_size=524288"
+    uci commit opentether
 
-        # ── Firewall zone ─────────────────────────────────────────────────────
-        uci -q delete firewall.opentether_zone || true
-        uci set firewall.opentether_zone=zone
-        uci set firewall.opentether_zone.name='opentether'
-        uci set firewall.opentether_zone.network='opentether'
-        uci set firewall.opentether_zone.input='REJECT'
-        uci set firewall.opentether_zone.output='ACCEPT'
-        uci set firewall.opentether_zone.forward='REJECT'
-        uci set firewall.opentether_zone.masq='1'
-        uci set firewall.opentether_zone.ip6masq='1'
-        uci set firewall.opentether_zone.mtu_fix='1'
+    logger -t opentether "[$serial] device registered (port=$port iface=$iface) — not yet enabled"
+    echo "Device $serial registered. Configure and save in LuCI to enable."
+}
 
-        uci -q delete firewall.opentether_forward || true
-        uci set firewall.opentether_forward=forwarding
-        uci set firewall.opentether_forward.src='lan'
-        uci set firewall.opentether_forward.dest='opentether'
+# ── Apply (save and activate) ──────────────────────────────────────────────────
+apply_device() {
+    local serial="$1"
+    [ -n "$serial" ] || { echo "Usage: $0 apply <serial>" >&2; exit 1; }
+
+    local cfg iface ipv4 metric
+    cfg=$(_cfg_for_serial "$serial")
+    [ -n "$cfg" ] || { echo "ERROR: no config for $serial" >&2; exit 1; }
+
+    iface="$(dget $cfg iface  || echo s5tun0)"
+    ipv4="$(dget $cfg ipv4   || echo 198.18.0.1)"
+    metric="$(dget $cfg metric || echo 10)"
+
+    generate_yaml "$serial"
+
+    # Sync network interface UCI
+    uci set "network.ot_${serial}=interface"
+    uci set "network.ot_${serial}.proto=static"
+    uci set "network.ot_${serial}.device=${iface}"
+    uci set "network.ot_${serial}.ipaddr=${ipv4}"
+    uci set "network.ot_${serial}.netmask=255.255.255.255"
+    uci set "network.ot_${serial}.metric=${metric}"
+    uci commit network
+
+    # Ensure firewall zone and forwarding exist for this device
+    local zone="ot_zone_${serial}"
+    local fwd="ot_fwd_${serial}"
+    if ! uci -q get "firewall.${zone}" >/dev/null 2>&1; then
+        uci set "firewall.${zone}=zone"
+        uci set "firewall.${zone}.name=ot_${serial}"
+        uci set "firewall.${zone}.network=ot_${serial}"
+        uci set "firewall.${zone}.input=REJECT"
+        uci set "firewall.${zone}.output=ACCEPT"
+        uci set "firewall.${zone}.forward=REJECT"
+        uci set "firewall.${zone}.masq=1"
+        uci set "firewall.${zone}.ip6masq=1"
+        uci set "firewall.${zone}.mtu_fix=1"
+        uci set "firewall.${fwd}=forwarding"
+        uci set "firewall.${fwd}.src=lan"
+        uci set "firewall.${fwd}.dest=ot_${serial}"
         uci commit firewall
+        /etc/init.d/firewall restart
+    fi
 
-        # ── DNS ───────────────────────────────────────────────────────────────
-        uci -q delete dhcp.@dnsmasq[0].server || true
-        uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
-        uci add_list dhcp.@dnsmasq[0].server='2606:4700:4700::1111'
-        uci set dhcp.@dnsmasq[0].noresolv='1'
-        uci set dhcp.@dnsmasq[0].localservice='0'
-        uci commit dhcp
+    echo f > /proc/net/nf_conntrack 2>/dev/null || true
+
+    # Full restart so procd re-registers all instances with correct commands
+    ifdown "ot_${serial}" 2>/dev/null
+    ifup   "ot_${serial}" 2>/dev/null
+    /etc/init.d/opentether restart
+    logger -t opentether "[$serial] applied"
+}
+
+# ── Remove device ──────────────────────────────────────────────────────────────
+remove_device() {
+    local serial="$1"
+    [ -n "$serial" ] || { echo "Usage: $0 remove-device <serial>" >&2; exit 1; }
+
+    local cfg
+    cfg=$(_cfg_for_serial "$serial")
+
+    # Kill watchdog
+    local pidfile="/tmp/opentether-watchdog-${serial}.pid"
+    [ -f "$pidfile" ] && kill "$(cat $pidfile)" 2>/dev/null && rm -f "$pidfile"
+    rm -rf "/tmp/opentether-${serial}.lock"
+
+    # Stop tunnel instance and clean up PID files
+    ubus call service set '{"name":"opentether","instances":{"'"${serial}"'":{"action":"stop"}}}' 2>/dev/null || true
+    rm -f "/tmp/opentether-tunnel-${serial}.pid"
+
+    # Remove forward
+    adb -s "$serial" forward --remove-all 2>/dev/null || true
+
+    # Tear down network interface
+    ifdown "ot_${serial}" 2>/dev/null || true
+    uci -q delete "network.ot_${serial}" || true
+    uci commit network 2>/dev/null || true
+
+    # Remove firewall zone/forward
+    uci -q delete "firewall.ot_zone_${serial}" || true
+    uci -q delete "firewall.ot_fwd_${serial}"  || true
+    uci commit firewall 2>/dev/null || true
+
+    # Remove YAML
+    rm -f "${YAML_DIR}/${serial}.yml"
+
+    # Remove UCI device section
+    [ -n "$cfg" ] && { uci -q delete "opentether.${cfg}" || true; uci commit opentether || true; }
+
+    # Reload only what's needed — full network restart kills LuCI connection
+    /etc/init.d/opentether restart
+    /etc/init.d/firewall reload 2>/dev/null || /etc/init.d/firewall restart
+
+    logger -t opentether "[$serial] removed"
+}
+
+# ── Install / upgrade ──────────────────────────────────────────────────────────
+install() {
+    mkdir -p "$YAML_DIR" "$YAML_BACKUP_DIR"
+
+    # Detect state:
+    #   - has device sections = 1.2.x config already present, just ensure service is enabled
+    #   - has legacy tunnel/socks5 sections = upgrading from 1.1.x
+    #   - neither = genuine fresh install
+
+    local has_devices has_legacy
+    uci show opentether 2>/dev/null | grep -q "=device$"  && has_devices=1 || has_devices=0
+    uci show opentether 2>/dev/null | grep -q "^opentether\.tunnel=" && has_legacy=1 || has_legacy=0
+
+    if [ "$has_devices" = "1" ]; then
+        # Already configured — just make sure the service is enabled and running
+        /etc/init.d/opentether enable
+        /etc/init.d/opentether restart
+        echo "OpenTether upgraded — existing device config preserved."
+        return 0
+    fi
+
+    if [ "$has_legacy" = "1" ]; then
+        # Upgrading from 1.1.x — migrate old single-device config into a device section
+        # Use a placeholder serial; user can rename in LuCI after identifying their device
+        local port iface ipv4 ipv6 mtu metric
+        port="$(uci -q get opentether.socks5.port    || echo 1088)"
+        iface="$(uci -q get opentether.tunnel.name   || echo s5tun0)"
+        ipv4="$(uci -q get opentether.tunnel.ipv4    || echo 198.18.0.1)"
+        ipv6="$(uci -q get opentether.tunnel.ipv6    || echo fc00::1)"
+        mtu="$(uci -q get opentether.tunnel.mtu      || echo 1440)"
+        metric="10"
+
+        local section="device_migrated"
+        uci set "opentether.${section}=device"
+        uci set "opentether.${section}.serial=migrated"
+        uci set "opentether.${section}.name=Migrated from 1.1.x"
+        uci set "opentether.${section}.enabled=1"
+        uci set "opentether.${section}.port=${port}"
+        uci set "opentether.${section}.iface=${iface}"
+        uci set "opentether.${section}.mtu=${mtu}"
+        uci set "opentether.${section}.ipv4=${ipv4}"
+        uci set "opentether.${section}.ipv6=${ipv6}"
+        uci set "opentether.${section}.metric=${metric}"
+        uci set "opentether.${section}.s5_address=$(uci -q get opentether.socks5.address || echo 127.0.0.1)"
+        uci set "opentether.${section}.s5_udp=$(uci -q get opentether.socks5.udp || echo tcp)"
+        uci set "opentether.${section}.s5_pipeline=$(uci -q get opentether.socks5.pipeline || echo 0)"
+        uci set "opentether.${section}.s5_mark=$(uci -q get opentether.socks5.mark || echo 0)"
+        uci set "opentether.${section}.md_address=$(uci -q get opentether.mapdns.address || echo 127.0.0.1)"
+        uci set "opentether.${section}.md_port=$(uci -q get opentether.mapdns.port || echo $port)"
+        uci set "opentether.${section}.md_network=$(uci -q get opentether.mapdns.network || echo 100.64.0.0)"
+        uci set "opentether.${section}.md_netmask=$(uci -q get opentether.mapdns.netmask || echo 255.192.0.0)"
+        uci set "opentether.${section}.md_cache_size=$(uci -q get opentether.mapdns.cache_size || echo 10000)"
+        uci set "opentether.${section}.task_stack_size=$(uci -q get opentether.misc.task_stack_size || echo 86016)"
+        uci set "opentether.${section}.tcp_buffer_size=$(uci -q get opentether.misc.tcp_buffer_size || echo 65536)"
+        uci set "opentether.${section}.udp_recv_buffer_size=$(uci -q get opentether.misc.udp_recv_buffer_size || echo 524288)"
+        uci set "opentether.${section}.log_level=$(uci -q get opentether.misc.log_level || echo warn)"
+
+        # Remove legacy sections
+        for sec in tunnel socks5 mapdns misc; do
+            uci -q delete "opentether.${sec}" || true
+        done
+        uci commit opentether 2>/dev/null || true
 
         /etc/init.d/opentether enable
-        /etc/init.d/network restart
-        /etc/init.d/firewall restart
-        /etc/init.d/dnsmasq restart
-
-        echo "OpenTether installed. Plug in your phone and approve USB debugging."
-    else
-        # Upgrade — YAML already regenerated above, just reload the tunnel
         /etc/init.d/opentether restart
-        echo "OpenTether upgraded."
+        echo "OpenTether upgraded from 1.1.x — config migrated. Update the device serial in LuCI."
+        return 0
     fi
-    ;;
 
-apply)
-    generate_yaml
-    # Update network interface device/IP in case they changed
-    uci set network.opentether.device="$(uget tunnel.name || echo s5tun0)"
-    uci set network.opentether.ipaddr="$(uget tunnel.ipv4 || echo 198.18.0.1)"
-    uci commit network
-    # Stop tunnel first so it doesn't respawn against a dead interface
-    /etc/init.d/opentether stop
-    # Flush conntrack so stale sessions don't persist through the restart
-    echo f > /proc/net/nf_conntrack 2>/dev/null || true
-    # Bounce only the opentether interface — avoids disrupting WAN and LuCI
-    ifdown opentether 2>/dev/null; ifup opentether 2>/dev/null
-    # Start tunnel after interface is back up
-    /etc/init.d/opentether start
-    ;;
+    # Genuine fresh install
+    /etc/init.d/opentether enable
+    echo "OpenTether installed. Plug in a phone and add it in LuCI to get started."
+}
 
-remove)
-    # Kill watchdog if running
-    if [ -f /tmp/opentether-hotplug.pid ]; then
-        kill "$(cat /tmp/opentether-hotplug.pid)" 2>/dev/null
-        rm -f /tmp/opentether-hotplug.pid
-    fi
-    rm -rf /tmp/opentether.lock
-
+# ── Remove (full uninstall) ────────────────────────────────────────────────────
+remove() {
     /etc/init.d/opentether stop    2>/dev/null
     /etc/init.d/opentether disable 2>/dev/null
 
-    adb forward --remove-all 2>/dev/null || true
+    # Kill all watchdogs
+    for pidfile in /tmp/opentether-watchdog-*.pid; do
+        [ -f "$pidfile" ] || continue
+        kill "$(cat $pidfile)" 2>/dev/null
+        rm -f "$pidfile"
+    done
+    rm -rf /tmp/opentether-*.lock
 
-    [ -f "$YAML_BACKUP" ] && mv "$YAML_BACKUP" "$YAML"
+    # Remove all device configs — avoid pipe subshell by collecting first
+    local cfg serial
+    for cfg in $(uci show opentether 2>/dev/null | grep "=device$" | \
+                 awk -F= '{split($1,a,"."); print a[2]}'); do
+        serial="$(uci -q get opentether.${cfg}.serial 2>/dev/null || true)"
+        [ -n "$serial" ] && remove_device "$serial"
+    done
 
-    uci -q delete network.opentether       || true
-    uci commit network
-    uci -q delete firewall.opentether_zone    || true
-    uci -q delete firewall.opentether_forward || true
-    uci commit firewall
-    uci -q delete dhcp.@dnsmasq[0].server || true
-    uci set dhcp.@dnsmasq[0].noresolv='0'
-    uci set dhcp.@dnsmasq[0].localservice='1'
-    uci commit dhcp
+    uci -q delete opentether.defaults
+    uci commit opentether
 
-    rm -f /etc/resolv.conf
+    rm -f /etc/resolv.conf  # dnsmasq will regenerate
 
     /etc/init.d/network restart
     /etc/init.d/firewall restart
     /etc/init.d/dnsmasq restart
-    ;;
+}
 
-*)
-    echo "Usage: $0 install|apply|remove" >&2
-    exit 1
-    ;;
+case "$1" in
+    install)     install ;;
+    add-device)  add_device "$2" "$3" ;;
+    apply)       apply_device "$2" ;;
+    remove-device) remove_device "$2" ;;
+    remove)      remove ;;
+    *)
+        echo "Usage: $0 install|add-device <serial> [name]|apply <serial>|remove-device <serial>|remove" >&2
+        exit 1
+        ;;
 esac
 
 exit 0

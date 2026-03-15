@@ -1,116 +1,174 @@
 #!/bin/sh
 # /etc/hotplug.d/usb/99-opentether
-# Handles ACTION=add (connect) and ACTION=remove (disconnect)
+# Per-device handler: one lock and one watchdog per device serial.
 
-PIDFILE=/tmp/opentether-hotplug.pid
-PORT="$(uci -q get opentether.socks5.port || echo 1088)"
+_serial_from_adb() {
+    adb devices 2>/dev/null | awk '/\tdevice$/{print $1; exit}'
+}
 
-# On removal: kill background handler and clean up
+_port_for_serial() {
+    local serial="$1"
+    # Find the UCI device section matching this serial
+    local cfg
+    cfg=$(uci show opentether 2>/dev/null | \
+          awk -F= '/\.serial=/{gsub(/'\''/, "", $2); if ($2 == "'"$serial"'") {split($1,a,"."); print a[2]}}' | head -1)
+    [ -n "$cfg" ] && uci -q get "opentether.${cfg}.port" && return
+    echo ""
+}
+
+_is_configured() {
+    local serial="$1"
+    local port cfg enabled
+    port=$(_port_for_serial "$serial")
+    [ -z "$port" ] && return 1
+    cfg=$(uci show opentether 2>/dev/null | \
+          awk -F= -v s="$serial" '/\.serial=/{gsub(/'\''/, "", $2); if ($2 == s) {split($1,a,"."); print a[2]}}' | head -1)
+    enabled="$(uci -q get "opentether.${cfg}.enabled" 2>/dev/null)"
+    [ "$enabled" = "1" ] && return 0 || return 1
+}
+
+# ACTION=remove: find all watchdogs for devices that just disconnected
 if [ "$ACTION" = "remove" ]; then
-    if [ -f "$PIDFILE" ]; then
-        kill "$(cat $PIDFILE)" 2>/dev/null
-        rm -f "$PIDFILE"
-    fi
-    rm -rf /tmp/opentether.lock
-    logger -t opentether "USB device removed — ready for reconnect"
+    for pidfile in /tmp/opentether-watchdog-*.pid; do
+        [ -f "$pidfile" ] || continue
+        serial="${pidfile#/tmp/opentether-watchdog-}"
+        serial="${serial%.pid}"
+        # Check if device is still connected
+        if ! adb -s "$serial" get-state 2>/dev/null | grep -q "^device$"; then
+            logger -t opentether "[$serial] USB removed — cleaning up"
+            kill "$(cat $pidfile)" 2>/dev/null
+            rm -f "$pidfile"
+            rm -rf "/tmp/opentether-${serial}.lock"
+            adb -s "$serial" forward --remove-all 2>/dev/null || true
+            # Stop just this device's tunnel instance via ubus
+            ubus call service set "{\"name\":\"opentether\",\"instances\":{\"${serial}\":{\"action\":\"stop\"}}}" 2>/dev/null || true
+            # Remove the PID file so LuCI shows Stopped
+            rm -f "/tmp/opentether-tunnel-${serial}.pid"
+        fi
+    done
     exit 0
 fi
 
 [ "$ACTION" = "add" ] || exit 0
 
-# Atomic lock — prevents race when multiple USB events fire at once
-mkdir /tmp/opentether.lock 2>/dev/null || exit 0
+# Brief pause — let adb server settle after USB event
+sleep 1
+
+adb start-server 2>/dev/null
+
+# Wait for any authorized device
+retries=60
+DEVICE=""
+while [ $retries -gt 0 ] && [ -z "$DEVICE" ]; do
+    DEVICE="$(_serial_from_adb)"
+    [ -z "$DEVICE" ] && sleep 1
+    retries=$((retries - 1))
+done
+
+if [ -z "$DEVICE" ]; then
+    logger -t opentether "WARNING: ADB authorization timed out after 60s"
+    exit 1
+fi
+
+logger -t opentether "[$DEVICE] ADB authorized"
+
+# Atomic lock per device
+mkdir "/tmp/opentether-${DEVICE}.lock" 2>/dev/null || exit 0
 
 (
+    PIDFILE="/tmp/opentether-watchdog-${DEVICE}.pid"
     echo $$ > "$PIDFILE"
-    logger -t opentether "USB device connected — waiting for ADB authorization"
 
-    adb start-server
+    # Only proceed with forward + tunnel if device is configured
+    if ! _is_configured "$DEVICE"; then
+        logger -t opentether "[$DEVICE] detected but not configured — skipping tunnel"
+        rm -f "$PIDFILE"
+        rm -rf "/tmp/opentether-${DEVICE}.lock"
+        exit 0
+    fi
 
-    # Wait for a single authorized device
-    retries=60
-    while [ $retries -gt 0 ]; do
-        DEVICE="$(adb devices 2>/dev/null | awk '/\tdevice$/{print $1; exit}')"
-        if [ -n "$DEVICE" ]; then
-            logger -t opentether "ADB authorized — device: $DEVICE — setting port forward"
+    PORT="$(_port_for_serial "$DEVICE")"
+    logger -t opentether "[$DEVICE] configured on port $PORT — setting forward"
 
-            # Set forward BEFORE starting the tunnel so 127.0.0.1:$PORT
-            # is already listening when hev-socks5-tunnel first connects
-            fwd_ok=0
-            for attempt in 1 2 3; do
-                adb -s "$DEVICE" forward tcp:${PORT} tcp:${PORT} 2>/dev/null
-                sleep 1
-                if adb -s "$DEVICE" forward --list 2>/dev/null | grep -q "${PORT}"; then
-                    logger -t opentether "Port forward active (attempt $attempt) — starting tunnel"
-                    fwd_ok=1
-                    break
-                fi
-                logger -t opentether "Forward attempt $attempt failed — retrying"
-            done
+    # Remove any stale forward first
+    adb -s "$DEVICE" forward --remove-all 2>/dev/null || true
 
-            if [ $fwd_ok -eq 0 ]; then
-                logger -t opentether "ERROR: adb forward failed after 3 attempts"
-                rm -f "$PIDFILE"
-                rm -rf /tmp/opentether.lock
-                exit 1
-            fi
-
-            /etc/init.d/opentether restart
-            logger -t opentether "Tunnel started — watching for issues"
-
-            rm -rf /tmp/opentether.lock
-
-            # Watchdog: checks device state, forward, and tunnel process every 10s
-            while true; do
-                sleep 10
-
-                # Use get-state to confirm device is still connected
-                STATE="$(adb -s "$DEVICE" get-state 2>/dev/null)"
-                if [ "$STATE" != "device" ]; then
-                    logger -t opentether "WATCHDOG: device $DEVICE gone (state: ${STATE:-disconnected}) — stopping tunnel"
-                    logger -t opentether "WARNING: tunnel is DOWN — no internet until phone is reconnected"
-                    /etc/init.d/opentether stop
-                    rm -f "$PIDFILE"
-                    exit 0
-                fi
-
-                # Check forward is still listed; re-establish if missing
-                if ! adb -s "$DEVICE" forward --list 2>/dev/null | grep -q "${PORT}"; then
-                    logger -t opentether "WATCHDOG: forward lost — re-establishing"
-                    adb -s "$DEVICE" forward tcp:${PORT} tcp:${PORT} 2>/dev/null
-                    sleep 1
-                    if ! adb -s "$DEVICE" forward --list 2>/dev/null | grep -q "${PORT}"; then
-                        logger -t opentether "WATCHDOG: forward restore failed — stopping tunnel"
-                        logger -t opentether "WARNING: tunnel is DOWN — no internet until phone is reconnected"
-                        /etc/init.d/opentether stop
-                        rm -f "$PIDFILE"
-                        exit 0
-                    fi
-                    logger -t opentether "WATCHDOG: forward restored — restarting tunnel"
-                    /etc/init.d/opentether restart
-                    # Give tunnel a moment to come up before next watchdog tick
-                    sleep 3
-                    continue
-                fi
-
-                if ! pgrep -f hev-socks5-tunnel >/dev/null 2>&1; then
-                    logger -t opentether "WATCHDOG: tunnel process died — restarting"
-                    /etc/init.d/opentether restart
-                    # Verify forward survived the restart
-                    sleep 2
-                    if ! adb -s "$DEVICE" forward --list 2>/dev/null | grep -q "${PORT}"; then
-                        logger -t opentether "WATCHDOG: forward lost after tunnel restart — re-establishing"
-                        adb -s "$DEVICE" forward tcp:${PORT} tcp:${PORT} 2>/dev/null
-                    fi
-                fi
-            done
-        fi
-
+    # Set forward with retries
+    fwd_ok=0
+    for attempt in 1 2 3; do
+        adb -s "$DEVICE" forward tcp:${PORT} tcp:${PORT} 2>/dev/null
         sleep 1
-        retries=$((retries - 1))
+        if adb -s "$DEVICE" forward --list 2>/dev/null | grep -q "${PORT}"; then
+            logger -t opentether "[$DEVICE] forward active (attempt $attempt)"
+            fwd_ok=1
+            break
+        fi
+        logger -t opentether "[$DEVICE] forward attempt $attempt failed — retrying"
     done
 
-    logger -t opentether "WARNING: ADB authorization timed out after 60s"
-    rm -f "$PIDFILE"
-    rm -rf /tmp/opentether.lock
+    if [ $fwd_ok -eq 0 ]; then
+        logger -t opentether "[$DEVICE] ERROR: adb forward failed after 3 attempts"
+        rm -f "$PIDFILE"
+        rm -rf "/tmp/opentether-${DEVICE}.lock"
+        exit 1
+    fi
+
+    # Start only this device's tunnel instance via the init script
+    # The init script iterates UCI device sections — if this device is enabled
+    # and has a YAML, procd will register and start it
+    /etc/init.d/opentether start
+    # Verify this specific instance started
+    sleep 2
+    if ubus call service list '{"name":"opentether"}' 2>/dev/null | grep -q "\"$DEVICE\""; then
+        logger -t opentether "[$DEVICE] tunnel instance started"
+    else
+        logger -t opentether "[$DEVICE] WARNING: tunnel instance did not start — check YAML"
+    fi
+
+    rm -rf "/tmp/opentether-${DEVICE}.lock"
+
+    # Watchdog
+    while true; do
+        sleep 10
+
+        STATE="$(adb -s "$DEVICE" get-state 2>/dev/null)"
+        if [ "$STATE" != "device" ]; then
+            logger -t opentether "[$DEVICE] WATCHDOG: gone (state: ${STATE:-disconnected}) — stopping tunnel"
+            logger -t opentether "[$DEVICE] WARNING: tunnel DOWN — no internet from this device"
+            # Stop just this instance
+            ubus call service set '{"name":"opentether","instances":{"'"$DEVICE"'":{"action":"stop"}}}' 2>/dev/null || true
+            adb -s "$DEVICE" forward --remove-all 2>/dev/null || true
+            rm -f "/tmp/opentether-tunnel-${DEVICE}.pid"
+            rm -f "$PIDFILE"
+            exit 0
+        fi
+
+        # Check forward still present
+        if ! adb -s "$DEVICE" forward --list 2>/dev/null | grep -q "${PORT}"; then
+            logger -t opentether "[$DEVICE] WATCHDOG: forward lost — re-establishing"
+            adb -s "$DEVICE" forward tcp:${PORT} tcp:${PORT} 2>/dev/null
+            sleep 1
+            if ! adb -s "$DEVICE" forward --list 2>/dev/null | grep -q "${PORT}"; then
+                logger -t opentether "[$DEVICE] WATCHDOG: forward unrestorable — stopping tunnel"
+                logger -t opentether "[$DEVICE] WARNING: tunnel DOWN — no internet from this device"
+                rm -f "$PIDFILE"
+                exit 0
+            fi
+            logger -t opentether "[$DEVICE] WATCHDOG: forward restored"
+        fi
+
+        # Check tunnel process alive
+        if [ -f "/tmp/opentether-tunnel-${DEVICE}.pid" ]; then
+            PID="$(cat /tmp/opentether-tunnel-${DEVICE}.pid 2>/dev/null)"
+            if [ -n "$PID" ] && ! kill -0 "$PID" 2>/dev/null; then
+                logger -t opentether "[$DEVICE] WATCHDOG: tunnel process died — procd will respawn"
+                # Give procd a moment to respawn, then verify forward is still present
+                sleep 3
+                if ! adb -s "$DEVICE" forward --list 2>/dev/null | grep -q "${PORT}"; then
+                    logger -t opentether "[$DEVICE] WATCHDOG: re-establishing forward after respawn"
+                    adb -s "$DEVICE" forward tcp:${PORT} tcp:${PORT} 2>/dev/null
+                fi
+            fi
+        fi
+    done
 ) &
