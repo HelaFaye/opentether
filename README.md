@@ -1,18 +1,18 @@
 # OpenTether
 
-Uses your Android device's internet connection as a router WAN via USB tethering over ADB and SOCKS5.
+Bridges any Android phone running a SOCKS5 proxy to any OpenWrt router WAN via ADB port forwarding and [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel).
 
-Plug in your Android device → approve USB debugging → internet works. No app required beyond any SOCKS5 proxy app on the phone.
+Plug in your phone → approve USB debugging → internet works. No app required beyond any SOCKS5 proxy app on the phone.
 
 ## How it works
 
-1. Android device is plugged into router USB
+1. Phone is plugged into router USB
 2. USB hotplug fires, `adb start-server` runs
-3. Android device shows "Allow USB debugging?" — user approves
+3. Phone shows "Allow USB debugging?" — user approves
 4. `adb forward tcp:1088 tcp:1088` tunnels the proxy to localhost
 5. `hev-socks5-tunnel` creates `s5tun0` virtual interface
 6. Default route and DNS are pinned through the tunnel
-7. All LAN clients use the device's internet connection
+7. All LAN clients use the phone's internet connection
 
 ## Packages
 
@@ -38,25 +38,21 @@ make package/opentether/compile V=s
 
 ## Installing
 
-The output path varies by target architecture. Replace `aarch64_cortex-a53` with your router's architecture.
-
 **apk (OpenWrt 24+ snapshot builds):**
 ```sh
-scp bin/packages/<arch>/base/opentether-*.apk root@192.168.1.1:/tmp/
+scp bin/packages/aarch64_cortex-a53/base/opentether-*.apk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1 "apk add --allow-untrusted /tmp/opentether-*.apk"
 ```
 
 **opkg (OpenWrt stable releases):**
 ```sh
-scp bin/packages/<arch>/base/opentether-*.ipk root@192.168.1.1:/tmp/
+scp bin/packages/aarch64_cortex-a53/base/opentether-*.ipk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1 "opkg install /tmp/opentether-*.ipk"
 ```
 
+## Phone setup
 
-## Android setup
-
-Install [Socks5](https://github.com/heiher/socks5) on your Android device and configure it to listen on port 1088 (or whatever port you configure in OpenTether). It's a lightweight SOCKS5 server by the same author as hev-socks5-tunnel. Enable USB debugging in Developer Options, plug into the router, and approve the debug prompt.
-
+Install any SOCKS5 proxy app on your Android phone and configure it to listen on port 1088 (or whatever port you configure in OpenTether). Enable USB debugging in Developer Options, plug into the router, and approve the debug prompt.
 
 ## Headless configuration (UCI)
 
@@ -80,10 +76,6 @@ uci commit opentether
 ```
 
 Full UCI schema: `opentether.tunnel`, `opentether.socks5`, `opentether.mapdns`, `opentether.misc`.
-
-## Package signing
-
-To avoid `--allow-untrusted` / unsigned package warnings, you can host these in your own signed feed. See the [OpenWrt package signing documentation](https://openwrt.org/docs/guide-developer/package-signing).
 
 ## Diagnostics
 
