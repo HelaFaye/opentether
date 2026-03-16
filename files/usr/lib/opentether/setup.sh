@@ -17,6 +17,12 @@ bool()  { [ "$1" = "1" ] && echo "true" || echo "false"; }
 opt()   { [ -n "$2" ] && [ "$2" != "0" ] && printf "  %s: %s\n" "$1" "$2"; }
 optq()  { [ -n "$2" ] && printf "  %s: '%s'\n" "$1" "$2"; }
 
+# YAML section parser — top-level to avoid POSIX sh nested function limitation
+_yget_sec() {
+    local yaml="$1" section="$2" key="$3"
+    sed -n "/^${section}:/,/^[^ ]/{  /^  ${key}:/{ s/^  ${key}:[[:space:]]*//; s/'//g; s/#.*//; s/[[:space:]]*$//; p; q } }" "$yaml"
+}
+
 # Find the UCI section name for a given serial
 _cfg_for_serial() {
     local serial="$1"
@@ -389,53 +395,48 @@ import_yaml() {
     [ -f "$yaml" ] || { echo "ERROR: no YAML at $yaml" >&2; exit 1; }
 
     # Parse a key from a specific section block
-    # Usage: _yget_sec "socks5" "port"
-    _yget_sec() {
-        local section="$1" key="$2"
-        awk "/^${section}:/{found=1} found && /^  ${key}:/{gsub(/['\"]|#.*/,\"\"); sub(/^  ${key}:[[:space:]]*/,\"\"); print; exit}" "$yaml" \
-            | tr -d '[:space:]'
-    }
+    # _yget_sec is defined at top level below import_yaml()
 
     local v
     # tunnel:
-    v=$(_yget_sec "tunnel" "name");         [ -n "$v" ] && uci set "opentether.${cfg}.iface=$v"
-    v=$(_yget_sec "tunnel" "mtu");          [ -n "$v" ] && uci set "opentether.${cfg}.mtu=$v"
-    v=$(_yget_sec "tunnel" "multi-queue");  [ -n "$v" ] && uci set "opentether.${cfg}.multi_queue=$([ "$v" = "true" ] && echo 1 || echo 0)"
-    v=$(_yget_sec "tunnel" "ipv4");         [ -n "$v" ] && uci set "opentether.${cfg}.ipv4=$v"
-    v=$(_yget_sec "tunnel" "ipv6");         [ -n "$v" ] && uci set "opentether.${cfg}.ipv6=$v"
-    v=$(_yget_sec "tunnel" "post-up-script");  uci set "opentether.${cfg}.post_up_script=$v"
-    v=$(_yget_sec "tunnel" "pre-down-script"); uci set "opentether.${cfg}.pre_down_script=$v"
+    v=$(_yget_sec "$yaml" "tunnel" "name");         [ -n "$v" ] && uci set "opentether.${cfg}.iface=$v"
+    v=$(_yget_sec "$yaml" "tunnel" "mtu");          [ -n "$v" ] && uci set "opentether.${cfg}.mtu=$v"
+    v=$(_yget_sec "$yaml" "tunnel" "multi-queue");  [ -n "$v" ] && uci set "opentether.${cfg}.multi_queue=$([ "$v" = "true" ] && echo 1 || echo 0)"
+    v=$(_yget_sec "$yaml" "tunnel" "ipv4");         [ -n "$v" ] && uci set "opentether.${cfg}.ipv4=$v"
+    v=$(_yget_sec "$yaml" "tunnel" "ipv6");         [ -n "$v" ] && uci set "opentether.${cfg}.ipv6=$v"
+    v=$(_yget_sec "$yaml" "tunnel" "post-up-script");  uci set "opentether.${cfg}.post_up_script=$v"
+    v=$(_yget_sec "$yaml" "tunnel" "pre-down-script"); uci set "opentether.${cfg}.pre_down_script=$v"
 
     # socks5:
-    v=$(_yget_sec "socks5" "port");         [ -n "$v" ] && uci set "opentether.${cfg}.port=$v"
-    v=$(_yget_sec "socks5" "address");      [ -n "$v" ] && uci set "opentether.${cfg}.s5_address=$v"
-    v=$(_yget_sec "socks5" "udp");          [ -n "$v" ] && uci set "opentether.${cfg}.s5_udp=$v"
-    v=$(_yget_sec "socks5" "udp-address");  uci set "opentether.${cfg}.s5_udp_address=$v"
-    v=$(_yget_sec "socks5" "pipeline");     [ "$v" = "true" ] && uci set "opentether.${cfg}.s5_pipeline=1" || uci set "opentether.${cfg}.s5_pipeline=0"
-    v=$(_yget_sec "socks5" "username");     uci set "opentether.${cfg}.s5_username=$v"
-    v=$(_yget_sec "socks5" "password");     uci set "opentether.${cfg}.s5_password=$v"
-    v=$(_yget_sec "socks5" "mark");         uci set "opentether.${cfg}.s5_mark=${v:-0}"
+    v=$(_yget_sec "$yaml" "socks5" "port");         [ -n "$v" ] && uci set "opentether.${cfg}.port=$v"
+    v=$(_yget_sec "$yaml" "socks5" "address");      [ -n "$v" ] && uci set "opentether.${cfg}.s5_address=$v"
+    v=$(_yget_sec "$yaml" "socks5" "udp");          [ -n "$v" ] && uci set "opentether.${cfg}.s5_udp=$v"
+    v=$(_yget_sec "$yaml" "socks5" "udp-address");  uci set "opentether.${cfg}.s5_udp_address=$v"
+    v=$(_yget_sec "$yaml" "socks5" "pipeline");     [ "$v" = "true" ] && uci set "opentether.${cfg}.s5_pipeline=1" || uci set "opentether.${cfg}.s5_pipeline=0"
+    v=$(_yget_sec "$yaml" "socks5" "username");     uci set "opentether.${cfg}.s5_username=$v"
+    v=$(_yget_sec "$yaml" "socks5" "password");     uci set "opentether.${cfg}.s5_password=$v"
+    v=$(_yget_sec "$yaml" "socks5" "mark");         uci set "opentether.${cfg}.s5_mark=${v:-0}"
 
     # mapdns:
-    v=$(_yget_sec "mapdns" "address");      [ -n "$v" ] && uci set "opentether.${cfg}.md_address=$v"
-    v=$(_yget_sec "mapdns" "port");         [ -n "$v" ] && uci set "opentether.${cfg}.md_port=$v"
-    v=$(_yget_sec "mapdns" "network");      [ -n "$v" ] && uci set "opentether.${cfg}.md_network=$v"
-    v=$(_yget_sec "mapdns" "netmask");      [ -n "$v" ] && uci set "opentether.${cfg}.md_netmask=$v"
-    v=$(_yget_sec "mapdns" "cache-size");   [ -n "$v" ] && uci set "opentether.${cfg}.md_cache_size=$v"
+    v=$(_yget_sec "$yaml" "mapdns" "address");      [ -n "$v" ] && uci set "opentether.${cfg}.md_address=$v"
+    v=$(_yget_sec "$yaml" "mapdns" "port");         [ -n "$v" ] && uci set "opentether.${cfg}.md_port=$v"
+    v=$(_yget_sec "$yaml" "mapdns" "network");      [ -n "$v" ] && uci set "opentether.${cfg}.md_network=$v"
+    v=$(_yget_sec "$yaml" "mapdns" "netmask");      [ -n "$v" ] && uci set "opentether.${cfg}.md_netmask=$v"
+    v=$(_yget_sec "$yaml" "mapdns" "cache-size");   [ -n "$v" ] && uci set "opentether.${cfg}.md_cache_size=$v"
 
     # misc:
-    v=$(_yget_sec "misc" "task-stack-size");       [ -n "$v" ] && uci set "opentether.${cfg}.task_stack_size=$v"
-    v=$(_yget_sec "misc" "tcp-buffer-size");       [ -n "$v" ] && uci set "opentether.${cfg}.tcp_buffer_size=$v"
-    v=$(_yget_sec "misc" "udp-recv-buffer-size");  [ -n "$v" ] && uci set "opentether.${cfg}.udp_recv_buffer_size=$v"
-    v=$(_yget_sec "misc" "udp-copy-buffer-nums");  uci set "opentether.${cfg}.udp_copy_buffer_nums=$v"
-    v=$(_yget_sec "misc" "max-session-count");     uci set "opentether.${cfg}.max_session_count=$v"
-    v=$(_yget_sec "misc" "connect-timeout");       uci set "opentether.${cfg}.connect_timeout=$v"
-    v=$(_yget_sec "misc" "tcp-read-write-timeout"); uci set "opentether.${cfg}.tcp_rw_timeout=$v"
-    v=$(_yget_sec "misc" "udp-read-write-timeout"); uci set "opentether.${cfg}.udp_rw_timeout=$v"
-    v=$(_yget_sec "misc" "log-file");              uci set "opentether.${cfg}.log_file=$v"
-    v=$(_yget_sec "misc" "log-level");             uci set "opentether.${cfg}.log_level=${v:-warn}"
-    v=$(_yget_sec "misc" "pid-file");              uci set "opentether.${cfg}.pid_file=$v"
-    v=$(_yget_sec "misc" "limit-nofile");          uci set "opentether.${cfg}.limit_nofile=$v"
+    v=$(_yget_sec "$yaml" "misc" "task-stack-size");       [ -n "$v" ] && uci set "opentether.${cfg}.task_stack_size=$v"
+    v=$(_yget_sec "$yaml" "misc" "tcp-buffer-size");       [ -n "$v" ] && uci set "opentether.${cfg}.tcp_buffer_size=$v"
+    v=$(_yget_sec "$yaml" "misc" "udp-recv-buffer-size");  [ -n "$v" ] && uci set "opentether.${cfg}.udp_recv_buffer_size=$v"
+    v=$(_yget_sec "$yaml" "misc" "udp-copy-buffer-nums");  uci set "opentether.${cfg}.udp_copy_buffer_nums=$v"
+    v=$(_yget_sec "$yaml" "misc" "max-session-count");     uci set "opentether.${cfg}.max_session_count=$v"
+    v=$(_yget_sec "$yaml" "misc" "connect-timeout");       uci set "opentether.${cfg}.connect_timeout=$v"
+    v=$(_yget_sec "$yaml" "misc" "tcp-read-write-timeout"); uci set "opentether.${cfg}.tcp_rw_timeout=$v"
+    v=$(_yget_sec "$yaml" "misc" "udp-read-write-timeout"); uci set "opentether.${cfg}.udp_rw_timeout=$v"
+    v=$(_yget_sec "$yaml" "misc" "log-file");              uci set "opentether.${cfg}.log_file=$v"
+    v=$(_yget_sec "$yaml" "misc" "log-level");             uci set "opentether.${cfg}.log_level=${v:-warn}"
+    v=$(_yget_sec "$yaml" "misc" "pid-file");              uci set "opentether.${cfg}.pid_file=$v"
+    v=$(_yget_sec "$yaml" "misc" "limit-nofile");          uci set "opentether.${cfg}.limit_nofile=$v"
 
     uci commit opentether
     logger -t opentether "[$serial] YAML imported to UCI"
