@@ -62,7 +62,7 @@ mkdir /tmp/opentether.lock 2>/dev/null || exit 0
 
             # Watchdog: checks device state, forward, and tunnel process every 10s
             while true; do
-                sleep 10
+                sleep 5
 
                 # Use get-state to confirm device is still connected
                 STATE="$(adb -s "$DEVICE" get-state 2>/dev/null)"
