@@ -1,8 +1,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=opentether
-PKG_VERSION:=1.1.0
-PKG_RELEASE:=3
+PKG_VERSION:=1.1.1
+PKG_RELEASE:=1
 
 PKG_MAINTAINER:=Alisha Faye <helafaye@users.noreply.github.com>
 PKG_LICENSE:=MIT
