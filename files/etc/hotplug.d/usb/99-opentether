@@ -133,6 +133,8 @@ rm -rf /tmp/opentether-add.lock
     # Restart to ensure procd registers/starts a fresh instance
     _restart_instance "$DEVICE"
     sleep 2
+    ifdown "ot_${DEVICE}" 2>/dev/null || true
+    ifup   "ot_${DEVICE}" 2>/dev/null || true
 
     if ubus call service list '{"name":"opentether"}' 2>/dev/null | grep -q "\"$DEVICE\""; then
         logger -t opentether "[$DEVICE] tunnel instance started"
@@ -154,6 +156,7 @@ rm -rf /tmp/opentether-add.lock
             logger -t opentether "[$DEVICE] WATCHDOG: gone (state: ${STATE:-disconnected}) — stopping tunnel"
             logger -t opentether "[$DEVICE] WARNING: tunnel DOWN — no internet from this device"
             _stop_instance "$DEVICE"
+            ifdown "ot_${DEVICE}" 2>/dev/null || true
             adb -s "$DEVICE" forward --remove-all 2>/dev/null || true
             rm -f "$PIDFILE"
             exit 0
@@ -173,6 +176,8 @@ rm -rf /tmp/opentether-add.lock
             fi
             logger -t opentether "[$DEVICE] WATCHDOG: forward restored — restarting tunnel"
             _restart_instance "$DEVICE"
+            ifdown "ot_${DEVICE}" 2>/dev/null || true
+            ifup   "ot_${DEVICE}" 2>/dev/null || true
             sleep 3
             continue
         fi
