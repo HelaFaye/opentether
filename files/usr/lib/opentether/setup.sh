@@ -340,13 +340,33 @@ install() {
 
         /etc/init.d/opentether enable
         /etc/init.d/opentether restart
+
+        # Ensure dnsmasq is configured — 1.1.x install sets this, but re-apply to be safe
+        uci -q delete dhcp.@dnsmasq[0].server || true
+        uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
+        uci add_list dhcp.@dnsmasq[0].server='2606:4700:4700::1111'
+        uci set dhcp.@dnsmasq[0].noresolv='1'
+        uci set dhcp.@dnsmasq[0].localservice='0'
+        uci commit dhcp
+        /etc/init.d/dnsmasq restart
+
         echo "OpenTether upgraded from 1.1.x — config migrated. Update the device serial in LuCI."
         return 0
     fi
 
     # Genuine fresh install
+
+    # ── DNS ───────────────────────────────────────────────────────────────────
+    uci -q delete dhcp.@dnsmasq[0].server || true
+    uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
+    uci add_list dhcp.@dnsmasq[0].server='2606:4700:4700::1111'
+    uci set dhcp.@dnsmasq[0].noresolv='1'
+    uci set dhcp.@dnsmasq[0].localservice='0'
+    uci commit dhcp
+    /etc/init.d/dnsmasq restart
+
     /etc/init.d/opentether enable
-    echo "OpenTether installed. Plug in a phone and add it in LuCI to get started."
+    echo "OpenTether installed. Plug in an Android device and add it in LuCI to get started."
 }
 
 # ── Remove (full uninstall) ────────────────────────────────────────────────────
@@ -372,6 +392,11 @@ remove() {
 
     uci -q delete opentether.defaults
     uci commit opentether
+
+    uci -q delete dhcp.@dnsmasq[0].server || true
+    uci set dhcp.@dnsmasq[0].noresolv='0'
+    uci set dhcp.@dnsmasq[0].localservice='1'
+    uci commit dhcp
 
     rm -f /etc/resolv.conf  # dnsmasq will regenerate
 

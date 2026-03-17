@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=opentether
 PKG_VERSION:=1.2.1
-PKG_RELEASE:=1
+PKG_RELEASE:=3
 
 PKG_MAINTAINER:=Alisha Faye <helafaye@users.noreply.github.com>
 PKG_LICENSE:=MIT
@@ -19,9 +19,9 @@ define Package/opentether
 endef
 
 define Package/opentether/description
-  Bridges any Android phone running a SOCKS5 proxy to any OpenWrt
+  Bridges any Android device running a SOCKS5 proxy to any OpenWrt
   router WAN via ADB port forwarding and hev-socks5-tunnel. Plug in
-  the phone, approve USB debugging, and the tunnel comes up
+  the device, approve USB debugging, and the tunnel comes up
   automatically.
 endef
 
