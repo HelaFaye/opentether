@@ -34,6 +34,22 @@ _restart_instance() {
     /etc/init.d/opentether start
 }
 
+_iface_for_serial() {
+    local serial="$1"
+    uci -q get "opentether.device_${serial}.iface" 2>/dev/null || echo "s5tun0"
+}
+
+# Poll for TUN device to appear — returns as soon as it's up, or 1 after timeout
+_wait_for_tun() {
+    local iface="$1" retries=15
+    while [ $retries -gt 0 ]; do
+        ip link show dev "$iface" >/dev/null 2>&1 && return 0
+        sleep 1
+        retries=$((retries - 1))
+    done
+    return 1
+}
+
 # ACTION=remove: clean up watchdogs for disconnected devices
 if [ "$ACTION" = "remove" ]; then
     rm -rf /tmp/opentether-add.lock 2>/dev/null
@@ -64,9 +80,6 @@ fi
 # Prevents multiple USB interface events from each calling adb start-server
 # and triggering multiple authorization prompts on the phone
 mkdir /tmp/opentether-add.lock 2>/dev/null || exit 0
-
-# Brief pause — let adb server settle after USB event
-sleep 1
 
 adb start-server 2>/dev/null
 
@@ -132,9 +145,13 @@ rm -rf /tmp/opentether-add.lock
 
     # Restart to ensure procd registers/starts a fresh instance
     _restart_instance "$DEVICE"
-    sleep 2
-    ifdown "ot_${DEVICE}" 2>/dev/null || true
-    ifup   "ot_${DEVICE}" 2>/dev/null || true
+    IFACE="$(_iface_for_serial "$DEVICE")"
+    if _wait_for_tun "$IFACE"; then
+        ifdown "ot_${DEVICE}" 2>/dev/null || true
+        ifup   "ot_${DEVICE}" 2>/dev/null || true
+    else
+        logger -t opentether "[$DEVICE] WARNING: TUN device $IFACE did not appear — routes may not be pinned"
+    fi
 
     if ubus call service list '{"name":"opentether"}' 2>/dev/null | grep -q "\"$DEVICE\""; then
         logger -t opentether "[$DEVICE] tunnel instance started"
@@ -176,8 +193,12 @@ rm -rf /tmp/opentether-add.lock
             fi
             logger -t opentether "[$DEVICE] WATCHDOG: forward restored — restarting tunnel"
             _restart_instance "$DEVICE"
-            ifdown "ot_${DEVICE}" 2>/dev/null || true
-            ifup   "ot_${DEVICE}" 2>/dev/null || true
+            if _wait_for_tun "$IFACE"; then
+                ifdown "ot_${DEVICE}" 2>/dev/null || true
+                ifup   "ot_${DEVICE}" 2>/dev/null || true
+            else
+                logger -t opentether "[$DEVICE] WARNING: TUN device $IFACE did not appear — routes may not be pinned"
+            fi
             sleep 3
             continue
         fi
