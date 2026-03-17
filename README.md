@@ -57,15 +57,17 @@ make package/opentether/compile V=s
 
 **apk (OpenWrt 24+ snapshot builds):**
 ```sh
-scp bin/packages/aarch64_cortex-a53/base/opentether-*.apk root@192.168.1.1:/tmp/
+scp bin/packages/<arch>/base/opentether-*.apk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1 "apk add --allow-untrusted /tmp/opentether-*.apk"
 ```
 
 **opkg (OpenWrt stable releases):**
 ```sh
-scp bin/packages/aarch64_cortex-a53/base/opentether-*.ipk root@192.168.1.1:/tmp/
+scp bin/packages/<arch>/base/opentether-*.ipk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1 "opkg install /tmp/opentether-*.ipk"
 ```
+
+Replace `<arch>` with your router's CPU architecture. If you're not sure, run `uname -m` on the router to check.
 
 ## Device setup
 
