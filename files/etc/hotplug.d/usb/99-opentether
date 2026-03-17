@@ -66,9 +66,11 @@ mkdir /tmp/opentether.lock 2>/dev/null || exit 0
 
                 # Use get-state to confirm device is still connected
                 STATE="$(adb -s "$DEVICE" get-state 2>/dev/null)"
+                # Skip unauthorized — device is pending approval, not gone
+                [ "$STATE" = "unauthorized" ] && continue
                 if [ "$STATE" != "device" ]; then
                     logger -t opentether "WATCHDOG: device $DEVICE gone (state: ${STATE:-disconnected}) — stopping tunnel"
-                    logger -t opentether "WARNING: tunnel is DOWN — no internet until phone is reconnected"
+                    logger -t opentether "WARNING: tunnel is DOWN — no internet until device is reconnected"
                     /etc/init.d/opentether stop
                     rm -f "$PIDFILE"
                     exit 0
