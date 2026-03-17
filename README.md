@@ -49,6 +49,8 @@ ssh root@192.168.1.1 "apk add --allow-untrusted /tmp/opentether-*.apk"
 scp bin/packages/<arch>/base/opentether-*.ipk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1 "opkg install /tmp/opentether-*.ipk"
 ```
+Replace <arch> with your router's CPU architecture
+If you're not sure, run ```uname -m``` to check
 
 ## Device setup
 
