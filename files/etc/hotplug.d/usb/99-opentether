@@ -89,7 +89,9 @@ fi
 logger -t opentether "[$DEVICE] ADB authorized"
 
 # Per-device lock — prevents duplicate handlers for same serial
-mkdir "/tmp/opentether-${DEVICE}.lock" 2>/dev/null || exit 0
+mkdir "/tmp/opentether-${DEVICE}.lock" 2>/dev/null || { rm -rf /tmp/opentether-add.lock; exit 0; }
+
+rm -rf /tmp/opentether-add.lock
 
 (
     PIDFILE="/tmp/opentether-watchdog-${DEVICE}.pid"
@@ -146,6 +148,8 @@ mkdir "/tmp/opentether-${DEVICE}.lock" 2>/dev/null || exit 0
         sleep 5
 
         STATE="$(adb -s "$DEVICE" get-state 2>/dev/null)"
+        # Skip unauthorized — device is pending approval, not gone
+        [ "$STATE" = "unauthorized" ] && continue
         if [ "$STATE" != "device" ]; then
             logger -t opentether "[$DEVICE] WATCHDOG: gone (state: ${STATE:-disconnected}) — stopping tunnel"
             logger -t opentether "[$DEVICE] WARNING: tunnel DOWN — no internet from this device"
