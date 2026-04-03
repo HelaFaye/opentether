@@ -7,12 +7,18 @@ section() { printf '\n%s\n %s\n%s\n' "$SEP" "$1" "$SEP"; }
 
 STATUS=0
 
-PORT="$(uci -q get opentether.socks5.port    || echo 1088)"
-NAME="$(uci -q get opentether.tunnel.name    || echo s5tun0)"
+PORT="$(uci -q get opentether.socks5.port || echo 1088)"
+NAME="$(uci -q get opentether.tunnel.name || echo s5tun0)"
 LOGFILE="$(uci -q get opentether.misc.log_file || echo '')"
 
-# Identify the connected device serial (first authorized device)
 DEVICE="$(adb devices 2>/dev/null | awk '/\tdevice$/{print $1; exit}')"
+
+forward_active() {
+    local dev="$1" port="$2"
+    adb -s "$dev" forward --list 2>/dev/null | awk -v p="tcp:${port}" '
+        $2 == p && $3 == p { found=1; exit }
+        END { exit(found ? 0 : 1) }'
+}
 
 section "ADB"
 adb devices
@@ -24,8 +30,8 @@ else
 fi
 
 section "Tunnel Process"
-if ps | grep hev-socks5 | grep -qv grep; then
-    ps | grep hev-socks5 | grep -v grep
+if pgrep -fa '[h]ev-socks5-tunnel' >/dev/null 2>&1; then
+    pgrep -fa '[h]ev-socks5-tunnel'
 else
     echo "NOT RUNNING"
     STATUS=2
@@ -33,15 +39,15 @@ fi
 
 section "Port Forward (tcp:${PORT})"
 if [ -n "$DEVICE" ]; then
-    if adb -s "$DEVICE" forward --list 2>/dev/null | grep -q "${PORT}"; then
+    if forward_active "$DEVICE" "$PORT"; then
         adb -s "$DEVICE" forward --list
     else
-        echo "(none)"
-        [ $STATUS -lt 1 ] && STATUS=1
+        echo "(missing exact tcp:${PORT} -> tcp:${PORT} forward)"
+        [ "$STATUS" -lt 1 ] && STATUS=1
     fi
 else
     echo "(no device)"
-    [ $STATUS -lt 1 ] && STATUS=1
+    [ "$STATUS" -lt 1 ] && STATUS=1
 fi
 
 section "Interface (${NAME})"
@@ -64,7 +70,7 @@ if [ -n "$V4" ]; then echo "$V4"; else echo "FAILED"; STATUS=2; fi
 
 section "IPv6 Connectivity"
 V6="$(curl -6 -s --max-time 5 https://ifconfig.co 2>/dev/null)"
-if [ -n "$V6" ]; then echo "$V6"; else echo "NOT AVAILABLE"; [ $STATUS -lt 1 ] && STATUS=1; fi
+if [ -n "$V6" ]; then echo "$V6"; else echo "NOT AVAILABLE"; [ "$STATUS" -lt 1 ] && STATUS=1; fi
 
 section "DNS Resolver"
 cat /etc/resolv.conf

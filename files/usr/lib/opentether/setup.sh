@@ -6,15 +6,26 @@
 YAML=/etc/hev-socks5-tunnel/main.yml
 YAML_BACKUP=/etc/hev-socks5-tunnel/main.yml.pre-opentether
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 uget() { uci -q get "opentether.$1" 2>/dev/null; }
 bool() { [ "$1" = "1" ] && echo "true" || echo "false"; }
 opt()  { [ -n "$2" ] && [ "$2" != "0" ] && printf "  %s: %s\n" "$1" "$2"; }
-optq() { [ -n "$2" ] && printf "  %s: '%s'\n" "$1" "$2"; }
+optq() { [ -n "$2" ] && printf "  %s: '\''%s'\''\n" "$1" "$2"; }
 
-# ── Generate YAML from current UCI values ─────────────────────────────────────
-# IMPORTANT: This function must stay in sync with buildYaml() in the LuCI
-# main.js view. If you add or change a field here, update main.js too.
+has_authorized_device() {
+    adb devices 2>/dev/null | awk '/\tdevice$/{found=1; exit} END{exit(found?0:1)}'
+}
+
+exact_forward_active() {
+    local dev="$1" port="$2"
+    adb -s "$dev" forward --list 2>/dev/null | awk -v p="tcp:${port}" '
+        $2 == p && $3 == p { found=1; exit }
+        END { exit(found ? 0 : 1) }'
+}
+
+active_device() {
+    adb devices 2>/dev/null | awk '/\tdevice$/{print $1; exit}'
+}
+
 generate_yaml() {
     [ -f "$YAML" ] || return 1
 
@@ -61,14 +72,11 @@ $(opt  "limit-nofile"            "$(uget misc.limit_nofile)")
 YAML
 }
 
-
-# YAML section parser
 _yget_sec() {
     local yaml="$1" section="$2" key="$3"
     sed -n "/^${section}:/,/^[^ ]/{ /^  ${key}:/{ s/^  ${key}:[[:space:]]*//; s/['\"]//g; s/#.*//; s/[[:space:]]*$//; p; q } }" "$yaml"
 }
 
-# Load YAML into UCI
 import_yaml() {
     local yaml="/etc/hev-socks5-tunnel/main.yml"
     [ -f "$yaml" ] || { echo "ERROR: no YAML at $yaml" >&2; exit 1; }
@@ -112,9 +120,6 @@ import_yaml() {
 
 case "$1" in
 install)
-    # Detect upgrade vs fresh install.
-    # On upgrade the UCI config already exists — skip service restarts to avoid
-    # disrupting active connections. Just regenerate the YAML and patch UCI.
     FRESH=1
     uci -q get opentether.tunnel >/dev/null 2>&1 && FRESH=0
 
@@ -123,7 +128,6 @@ install)
     generate_yaml
 
     if [ "$FRESH" = "1" ]; then
-        # ── Network interface ─────────────────────────────────────────────────
         uci -q delete network.opentether || true
         uci set network.opentether=interface
         uci set network.opentether.proto='static'
@@ -136,7 +140,6 @@ install)
         uci add_list network.opentether.dns='2606:4700:4700::1111'
         uci commit network
 
-        # ── Firewall zone ─────────────────────────────────────────────────────
         uci -q delete firewall.opentether_zone || true
         uci set firewall.opentether_zone=zone
         uci set firewall.opentether_zone.name='opentether'
@@ -154,7 +157,6 @@ install)
         uci set firewall.opentether_forward.dest='opentether'
         uci commit firewall
 
-        # ── DNS ───────────────────────────────────────────────────────────────
         uci -q delete dhcp.@dnsmasq[0].server || true
         uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
         uci add_list dhcp.@dnsmasq[0].server='2606:4700:4700::1111'
@@ -169,8 +171,7 @@ install)
 
         echo "OpenTether installed. Plug in your phone and approve USB debugging."
     else
-        # Upgrade — YAML already regenerated above, just reload the tunnel
-        /etc/init.d/opentether restart
+        logger -t opentether "Upgrade detected — YAML regenerated without forcing tunnel restart"
         echo "OpenTether upgraded."
     fi
     ;;
@@ -181,38 +182,43 @@ import-yaml)
 
 apply)
     generate_yaml
-    # Update network interface device/IP in case they changed
     uci set network.opentether.device="$(uget tunnel.name || echo s5tun0)"
     uci set network.opentether.ipaddr="$(uget tunnel.ipv4 || echo 198.18.0.1)"
     uci commit network
-    # Stop tunnel first so it doesn't respawn against a dead interface
-    /etc/init.d/opentether stop
-    # Flush conntrack so stale sessions don't persist through the restart
-    echo f > /proc/net/nf_conntrack 2>/dev/null || true
-    # Bounce only the opentether interface — avoids disrupting WAN and LuCI
-    ifdown opentether 2>/dev/null; ifup opentether 2>/dev/null
-    # Start tunnel after interface is back up
-    /etc/init.d/opentether start
+
+    ifdown opentether 2>/dev/null || true
+    ifup opentether 2>/dev/null || true
+
+    DEVICE="$(active_device || true)"
+    PORT="$(uget socks5.port || echo 1088)"
+
+    if [ -n "$DEVICE" ] && exact_forward_active "$DEVICE" "$PORT"; then
+        /etc/init.d/opentether restart >/dev/null 2>&1 || true
+        logger -t opentether "Applied config and restarted tunnel on active forwarded device $DEVICE"
+    else
+        /etc/init.d/opentether stop >/dev/null 2>&1 || true
+        logger -t opentether "Applied config — tunnel left stopped until an authorized forwarded device is present"
+    fi
     ;;
 
 remove)
-    # Kill watchdog if running
     if [ -f /tmp/opentether-hotplug.pid ]; then
-        kill "$(cat /tmp/opentether-hotplug.pid)" 2>/dev/null
+        kill "$(cat /tmp/opentether-hotplug.pid)" 2>/dev/null || true
         rm -f /tmp/opentether-hotplug.pid
     fi
+    rm -f /tmp/opentether-device
     rm -rf /tmp/opentether.lock
 
-    /etc/init.d/opentether stop    2>/dev/null
-    /etc/init.d/opentether disable 2>/dev/null
+    /etc/init.d/opentether stop    2>/dev/null || true
+    /etc/init.d/opentether disable 2>/dev/null || true
 
     adb forward --remove-all 2>/dev/null || true
 
     [ -f "$YAML_BACKUP" ] && mv "$YAML_BACKUP" "$YAML"
 
-    uci -q delete network.opentether       || true
+    uci -q delete network.opentether || true
     uci commit network
-    uci -q delete firewall.opentether_zone    || true
+    uci -q delete firewall.opentether_zone || true
     uci -q delete firewall.opentether_forward || true
     uci commit firewall
     uci -q delete dhcp.@dnsmasq[0].server || true
