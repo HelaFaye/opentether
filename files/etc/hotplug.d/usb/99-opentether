@@ -1,11 +1,15 @@
 #!/bin/sh
+# /etc/hotplug.d/usb/99-opentether
+# Handles ACTION=add (connect) and ACTION=remove (disconnect)
 
 PIDFILE=/tmp/opentether-hotplug.pid
 LOCKDIR=/tmp/opentether.lock
 STATEFILE=/tmp/opentether-device
 PORT="$(uci -q get opentether.socks5.port || echo 1088)"
 
-log() { logger -t opentether "$*"; }
+log() {
+    logger -t opentether "$*"
+}
 
 forward_active() {
     local dev="$1" port="$2"
@@ -14,83 +18,123 @@ forward_active() {
         END { exit(found ? 0 : 1) }'
 }
 
-stop_tunnel() {
-    /etc/init.d/opentether stop >/dev/null 2>&1 || true
-}
-
 cleanup() {
     rm -f "$PIDFILE" "$STATEFILE"
     rm -rf "$LOCKDIR"
 }
 
+stop_tunnel() {
+    /etc/init.d/opentether stop >/dev/null 2>&1 || true
+}
+
 if [ "$ACTION" = "remove" ]; then
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        rm -f "$PIDFILE"
+    fi
+    rm -f "$STATEFILE"
+    rm -rf "$LOCKDIR"
     stop_tunnel
-    cleanup
-    log "USB removed — tunnel stopped"
+    log "USB device removed — tunnel stopped and ready for reconnect"
     exit 0
 fi
 
 [ "$ACTION" = "add" ] || exit 0
+
 mkdir "$LOCKDIR" 2>/dev/null || exit 0
 
 (
-echo $$ > "$PIDFILE"
-trap 'cleanup; exit 0' INT TERM EXIT
+    echo $$ > "$PIDFILE"
+    trap 'cleanup; exit 0' INT TERM EXIT
 
-log "USB connected — waiting for ADB authorization"
-adb devices >/dev/null 2>&1 || true
+    log "USB device connected — waiting for ADB authorization"
 
-retries=90
-while [ "$retries" -gt 0 ]; do
-    DEVICE="$(adb devices 2>/dev/null | awk '/\tdevice$/{print $1; exit}')"
-    if [ -n "$DEVICE" ]; then
-        echo "$DEVICE" > "$STATEFILE"
-        log "ADB authorized: $DEVICE"
-        sleep 2
+    # Warm the adb server without explicitly restarting it on every plug event.
+    adb devices >/dev/null 2>&1 || true
 
-        adb -s "$DEVICE" forward tcp:${PORT} tcp:${PORT} >/dev/null 2>&1 || true
+    retries=90
+    while [ "$retries" -gt 0 ]; do
+        DEVICE="$(adb devices 2>/dev/null | awk '/\tdevice$/{print $1; exit}')"
 
-        if ! forward_active "$DEVICE" "$PORT"; then
-            log "Forward failed"
-            stop_tunnel
-            exit 1
-        fi
+        if [ -n "$DEVICE" ]; then
+            echo "$DEVICE" > "$STATEFILE"
+            log "ADB authorized — device: $DEVICE"
 
-        if ! pgrep -f hev-socks5-tunnel >/dev/null; then
-            log "Starting tunnel"
-            /etc/init.d/opentether start
-        fi
+            # Give transport a moment to settle after the user taps Allow.
+            sleep 2
 
-        log "Tunnel active"
-        rm -rf "$LOCKDIR"
+            fwd_ok=0
+            for attempt in 1 2 3 4 5; do
+                adb -s "$DEVICE" forward tcp:${PORT} tcp:${PORT} >/dev/null 2>&1 || true
+                sleep 1
+                if forward_active "$DEVICE" "$PORT"; then
+                    fwd_ok=1
+                    break
+                fi
+                log "Forward attempt $attempt failed — retrying"
+            done
 
-        while true; do
-            sleep 5
-            STATE="$(adb -s "$DEVICE" get-state 2>/dev/null || true)"
-
-            if [ "$STATE" != "device" ]; then
-                log "Device disconnected"
+            if [ "$fwd_ok" -ne 1 ]; then
+                log "ERROR: adb forward failed after 5 attempts"
                 stop_tunnel
-                exit 0
+                exit 1
             fi
 
-            if ! forward_active "$DEVICE" "$PORT"; then
-                log "Forward lost — restoring"
-                adb -s "$DEVICE" forward tcp:${PORT} tcp:${PORT}
+            if pgrep -f '[h]ev-socks5-tunnel' >/dev/null 2>&1; then
+                log "Tunnel already running — leaving process in place"
+            else
+                log "Port forward active — starting tunnel"
+                /etc/init.d/opentether start >/dev/null 2>&1 || true
+                sleep 2
             fi
 
-            if ! pgrep -f hev-socks5-tunnel >/dev/null; then
-                log "Tunnel stopped — restarting"
-                /etc/init.d/opentether start
-            fi
-        done
-    fi
+            log "Tunnel/watchdog active"
 
-    sleep 1
-    retries=$((retries - 1))
-done
+            rm -rf "$LOCKDIR"
 
-log "ADB authorization timeout"
-stop_tunnel
-exit 1
+            while true; do
+                sleep 5
+
+                STATE="$(adb -s "$DEVICE" get-state 2>/dev/null || true)"
+
+                [ "$STATE" = "unauthorized" ] && continue
+                [ "$STATE" = "offline" ] && continue
+
+                if [ "$STATE" != "device" ]; then
+                    log "WATCHDOG: device $DEVICE unavailable (state: ${STATE:-disconnected}) — stopping tunnel"
+                    stop_tunnel
+                    rm -f "$PIDFILE" "$STATEFILE"
+                    exit 0
+                fi
+
+                if ! forward_active "$DEVICE" "$PORT"; then
+                    log "WATCHDOG: forward lost — restoring"
+                    adb -s "$DEVICE" forward tcp:${PORT} tcp:${PORT} >/dev/null 2>&1 || true
+                    sleep 1
+
+                    if ! forward_active "$DEVICE" "$PORT"; then
+                        log "WATCHDOG: forward restore failed — stopping tunnel"
+                        stop_tunnel
+                        rm -f "$PIDFILE" "$STATEFILE"
+                        exit 0
+                    fi
+
+                    log "WATCHDOG: forward restored"
+                fi
+
+                if ! pgrep -f '[h]ev-socks5-tunnel' >/dev/null 2>&1; then
+                    log "WATCHDOG: tunnel process not running — starting"
+                    /etc/init.d/opentether start >/dev/null 2>&1 || true
+                    sleep 2
+                fi
+            done
+        fi
+
+        sleep 1
+        retries=$((retries - 1))
+    done
+
+    log "WARNING: ADB authorization timed out after 90s"
+    stop_tunnel
+    exit 1
 ) &

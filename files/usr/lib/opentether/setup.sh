@@ -9,11 +9,7 @@ YAML_BACKUP=/etc/hev-socks5-tunnel/main.yml.pre-opentether
 uget() { uci -q get "opentether.$1" 2>/dev/null; }
 bool() { [ "$1" = "1" ] && echo "true" || echo "false"; }
 opt()  { [ -n "$2" ] && [ "$2" != "0" ] && printf "  %s: %s\n" "$1" "$2"; }
-optq() { [ -n "$2" ] && printf "  %s: '\''%s'\''\n" "$1" "$2"; }
-
-has_authorized_device() {
-    adb devices 2>/dev/null | awk '/\tdevice$/{found=1; exit} END{exit(found?0:1)}'
-}
+optq() { [ -n "$2" ] && printf "  %s: '%s'\n" "$1" "$2"; }
 
 exact_forward_active() {
     local dev="$1" port="$2"
