@@ -10,3 +10,5 @@ staging_dir/
 *.swp
 *~
 .DS_Store
+
+.patch_backup_*/
