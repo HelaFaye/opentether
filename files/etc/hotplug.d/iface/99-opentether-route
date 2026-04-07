@@ -1,29 +1,79 @@
 #!/bin/sh
 # /etc/hotplug.d/iface/99-opentether-route
-# Fires when the opentether interface comes up.
-# Pins the default route and system resolver after netifd finishes.
+# Handles ifup and ifdown for ot_* interfaces.
 
-[ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "opentether" ] || exit 0
+# Only handle ot_* interfaces
+case "$INTERFACE" in
+    ot_*) ;;
+    *) exit 0 ;;
+esac
 
-NAME="$(uci -q get opentether.tunnel.name || echo s5tun0)"
-MTU="$(uci -q get opentether.tunnel.mtu   || echo 1440)"
+SERIAL="${INTERFACE#ot_}"
+# UCI section name is always device_<serial> (enforced by setup.sh add-device)
+MTU="$(uci -q get opentether.device_${SERIAL}.mtu    || echo 1440)"
+METRIC="$(uci -q get opentether.device_${SERIAL}.metric || echo 10)"
+IFACE="$(uci -q get opentether.device_${SERIAL}.iface  || echo s5tun0)"
 
-logger -t opentether "Interface up — pinning routes and resolver (dev=$NAME mtu=$MTU)"
+# ── TTL mangle helpers ────────────────────────────────────────────────────────
+_ttl_up() {
+    local serial="$1" iface="$2"
+    local ttl chain
+    ttl="$(uci -q get "opentether.device_${serial}.ttl_mangle" 2>/dev/null || echo 0)"
+    [ -z "$ttl" ] || [ "$ttl" = "0" ] && return 0
+    chain="ot_ttl_${serial}"
 
-ip link set dev "$NAME" mtu "$MTU"
+    # IPv4
+    iptables  -t mangle -N "$chain"                             2>/dev/null || true
+    iptables  -t mangle -F "$chain"                             2>/dev/null || true
+    iptables  -t mangle -A "$chain" -j TTL --ttl-set "$ttl"    2>/dev/null || true
+    iptables  -t mangle -A POSTROUTING -o "$iface" -j "$chain" 2>/dev/null || true
 
-ip route add    default dev "$NAME" metric 10 2>/dev/null \
-    || ip route replace default dev "$NAME" metric 10
+    # IPv6
+    ip6tables -t mangle -N "$chain"                             2>/dev/null || true
+    ip6tables -t mangle -F "$chain"                             2>/dev/null || true
+    ip6tables -t mangle -A "$chain" -j HL --hl-set "$ttl"      2>/dev/null || true
+    ip6tables -t mangle -A POSTROUTING -o "$iface" -j "$chain" 2>/dev/null || true
 
-ip -6 route add    default dev "$NAME" metric 10 2>/dev/null \
-    || ip -6 route replace default dev "$NAME" metric 10 2>/dev/null \
-    || logger -t opentether "IPv6 default route unavailable (IPv4-only upstream)"
+    logger -t opentether "[$serial] TTL/HL mangle set to $ttl"
+}
 
-# Only overwrite resolv.conf if 127.0.0.1 isn't already listed
-if ! grep -q 'nameserver 127.0.0.1' /etc/resolv.conf 2>/dev/null; then
-    printf 'nameserver 127.0.0.1\nnameserver ::1\n' > /etc/resolv.conf
+_ttl_down() {
+    local serial="$1" iface="$2"
+    local chain="ot_ttl_${serial}"
+
+    # IPv4
+    iptables  -t mangle -D POSTROUTING -o "$iface" -j "$chain" 2>/dev/null || true
+    iptables  -t mangle -F "$chain"                             2>/dev/null || true
+    iptables  -t mangle -X "$chain"                             2>/dev/null || true
+
+    # IPv6
+    ip6tables -t mangle -D POSTROUTING -o "$iface" -j "$chain" 2>/dev/null || true
+    ip6tables -t mangle -F "$chain"                             2>/dev/null || true
+    ip6tables -t mangle -X "$chain"                             2>/dev/null || true
+}
+
+if [ "$ACTION" = "ifup" ]; then
+    logger -t opentether "[$SERIAL] Interface up — pinning routes (dev=$IFACE mtu=$MTU metric=$METRIC)"
+
+    ip link set dev "$IFACE" mtu "$MTU" 2>/dev/null
+
+    ip route add    default dev "$IFACE" metric "$METRIC" 2>/dev/null \
+        || ip route replace default dev "$IFACE" metric "$METRIC"
+
+    ip -6 route add    default dev "$IFACE" metric "$METRIC" 2>/dev/null \
+        || ip -6 route replace default dev "$IFACE" metric "$METRIC"
+
+    if ! grep -q "127.0.0.1" /etc/resolv.conf 2>/dev/null; then
+        printf 'nameserver 127.0.0.1\nnameserver ::1\n' > /etc/resolv.conf
+    fi
+
+    _ttl_up "$SERIAL" "$IFACE"
+
+    logger -t opentether "[$SERIAL] Routes and resolver pinned"
+
+elif [ "$ACTION" = "ifdown" ]; then
+    logger -t opentether "[$SERIAL] Interface down — removing routes"
+    ip route del default dev "$IFACE" 2>/dev/null || true
+    ip -6 route del default dev "$IFACE" 2>/dev/null || true
+    _ttl_down "$SERIAL" "$IFACE"
 fi
-
-echo f > /proc/net/nf_conntrack 2>/dev/null || true
-
-logger -t opentether "Routes and resolver pinned"

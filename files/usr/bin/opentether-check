@@ -1,94 +1,90 @@
 #!/bin/sh
-# opentether-check — status diagnostic for OpenTether
-# Exit code: 0 = healthy, 1 = degraded, 2 = down
+# opentether-check — multi-device status diagnostic
+# Exit code: 0 = all healthy, 1 = degraded, 2 = one or more down
 
 SEP="────────────────────────────────────────"
 section() { printf '\n%s\n %s\n%s\n' "$SEP" "$1" "$SEP"; }
 
 STATUS=0
 
-PORT="$(uci -q get opentether.socks5.port || echo 1088)"
-NAME="$(uci -q get opentether.tunnel.name || echo s5tun0)"
-LOGFILE="$(uci -q get opentether.misc.log_file || echo '')"
-
-DEVICE="$(adb devices 2>/dev/null | awk '/\tdevice$/{print $1; exit}')"
-
-forward_active() {
-    local dev="$1" port="$2"
-    adb -s "$dev" forward --list 2>/dev/null | awk -v p="tcp:${port}" '
-        $2 == p && $3 == p { found=1; exit }
-        END { exit(found ? 0 : 1) }'
-}
-
-section "ADB"
+section "ADB Devices"
 adb devices
-if [ -n "$DEVICE" ]; then
-    echo "Using device: $DEVICE"
-else
-    echo "WARNING: no authorized device"
-    STATUS=2
+
+# Iterate over all configured devices
+DEVICES=$(uci show opentether 2>/dev/null | \
+    awk -F= '/[.]serial=/{v=$2; gsub(/\x27/,"",v); print v}')
+
+if [ -z "$DEVICES" ]; then
+    echo "No devices configured."
+    exit 0
 fi
 
-section "Tunnel Process"
-if pgrep -fa '[h]ev-socks5-tunnel' >/dev/null 2>&1; then
-    pgrep -fa '[h]ev-socks5-tunnel'
-else
-    echo "NOT RUNNING"
-    STATUS=2
-fi
+for DEVICE in $DEVICES; do
+    CFG=$(uci show opentether 2>/dev/null | \
+        awk -F= -v s="$DEVICE" '/[.]serial=/{v=$2; gsub(/\x27/,"",v); if(v==s){split($1,a,"."); print a[2]}}' | head -1)
+    PORT="$(uci -q get opentether.${CFG}.port    || echo 1088)"
+    IFACE="$(uci -q get opentether.${CFG}.iface  || echo s5tun0)"
+    NAME="$(uci -q get opentether.${CFG}.name    || echo '')"
+    LOGFILE="$(uci -q get opentether.${CFG}.log_file || echo '')"
+    ENABLED="$(uci -q get opentether.${CFG}.enabled || echo 0)"
 
-section "Port Forward (tcp:${PORT})"
-if [ -n "$DEVICE" ]; then
-    if forward_active "$DEVICE" "$PORT"; then
+    printf '\n%s\n Device: %s%s\n%s\n' "$SEP" "$DEVICE" \
+        "$([ -n "$NAME" ] && echo " — $NAME")" "$SEP"
+
+    echo "Enabled:  $ENABLED"
+    echo "Port:     $PORT"
+    echo "Interface:$IFACE"
+
+    # Forward
+    printf '\nPort Forward (tcp:%s):\n' "$PORT"
+    if adb -s "$DEVICE" forward --list 2>/dev/null | grep -q "${PORT}"; then
         adb -s "$DEVICE" forward --list
     else
-        echo "(missing exact tcp:${PORT} -> tcp:${PORT} forward)"
-        [ "$STATUS" -lt 1 ] && STATUS=1
+        echo "(none)"
+        [ $STATUS -lt 1 ] && STATUS=1
     fi
-else
-    echo "(no device)"
-    [ "$STATUS" -lt 1 ] && STATUS=1
-fi
 
-section "Interface (${NAME})"
-if ip addr show dev "$NAME" 2>/dev/null | grep -q "$NAME"; then
-    ip addr show dev "$NAME"
-else
-    echo "${NAME} not found"
-    STATUS=2
-fi
+    # Tunnel process
+    printf '\nTunnel Process:\n'
+    PIDFILE="/tmp/opentether-tunnel-${DEVICE}.pid"
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
+        echo "Running (PID $(cat $PIDFILE))"
+    else
+        echo "NOT RUNNING"
+        [ "$ENABLED" = "1" ] && STATUS=2
+    fi
 
-section "IPv4 Route"
-ip route show dev "$NAME" 2>/dev/null || echo "(none)"
+    # Interface
+    printf '\nInterface (%s):\n' "$IFACE"
+    if ip addr show dev "$IFACE" 2>/dev/null | grep -q "$IFACE"; then
+        ip addr show dev "$IFACE"
+    else
+        echo "${IFACE} not found"
+        [ "$ENABLED" = "1" ] && STATUS=2
+    fi
 
-section "IPv6 Route"
-ip -6 route show dev "$NAME" 2>/dev/null || echo "(none)"
+    # Connectivity
+    printf '\nConnectivity:\n'
+    V4="$(curl -4 -s --max-time 5 https://ifconfig.co 2>/dev/null)"
+    if [ -n "$V4" ]; then echo "IPv4: $V4"; else echo "IPv4: FAILED"; STATUS=2; fi
+    V6="$(curl -6 -s --max-time 5 https://ifconfig.co 2>/dev/null)"
+    if [ -n "$V6" ]; then echo "IPv6: $V6"; else echo "IPv6: NOT AVAILABLE"; fi
 
-section "IPv4 Connectivity"
-V4="$(curl -4 -s --max-time 5 https://ifconfig.co 2>/dev/null)"
-if [ -n "$V4" ]; then echo "$V4"; else echo "FAILED"; STATUS=2; fi
-
-section "IPv6 Connectivity"
-V6="$(curl -6 -s --max-time 5 https://ifconfig.co 2>/dev/null)"
-if [ -n "$V6" ]; then echo "$V6"; else echo "NOT AVAILABLE"; [ "$STATUS" -lt 1 ] && STATUS=1; fi
-
-section "DNS Resolver"
-cat /etc/resolv.conf
-
-section "Log (last 30 lines)"
-if [ -z "$LOGFILE" ] || [ "$LOGFILE" = "stdout" ] || [ "$LOGFILE" = "stderr" ]; then
-    logread -e opentether | tail -30
-elif [ -f "$LOGFILE" ]; then
-    grep opentether "$LOGFILE" | tail -30
-else
-    echo "(log file not found: $LOGFILE)"
-fi
+    # Log
+    printf '\nLog (last 20 lines):\n'
+    if [ -z "$LOGFILE" ] || [ "$LOGFILE" = "stdout" ] || [ "$LOGFILE" = "stderr" ]; then
+        { /sbin/logread -e "opentether" 2>/dev/null || logread -e "opentether" 2>/dev/null; } \
+            | grep "\[$DEVICE\]" | tail -20
+    elif [ -f "$LOGFILE" ]; then
+        grep "\[$DEVICE\]" "$LOGFILE" | tail -20
+    fi
+done
 
 printf '\n%s\n' "$SEP"
 case $STATUS in
-    0) echo " Status: HEALTHY" ;;
-    1) echo " Status: DEGRADED (IPv6 unavailable or forward missing)" ;;
-    2) echo " Status: DOWN" ;;
+    0) echo " Status: ALL HEALTHY" ;;
+    1) echo " Status: DEGRADED" ;;
+    2) echo " Status: ONE OR MORE DEVICES DOWN" ;;
 esac
 printf '%s\n' "$SEP"
 
