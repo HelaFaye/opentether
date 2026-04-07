@@ -1,1 +1,467 @@
-OpenTether package repository
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenTether — Package Repository</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:       #080c10;
+    --surface:  #0d1117;
+    --border:   #1c2330;
+    --accent:   #58a6ff;
+    --ok:       #3fb950;
+    --warn:     #d29922;
+    --text:     #c9d1d9;
+    --muted:    #6e7681;
+    --mono:     'IBM Plex Mono', monospace;
+    --sans:     'IBM Plex Sans', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* ── Grid lines background ── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(88,166,255,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(88,166,255,.025) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 0 1.5rem;
+  }
+
+  /* ── Header ── */
+  header {
+    padding: 4rem 0 3rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .logo-icon {
+    width: 40px;
+    height: 40px;
+    border: 1.5px solid var(--accent);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: .85rem;
+    font-weight: 600;
+    color: var(--accent);
+    flex-shrink: 0;
+    animation: pulse-border 3s ease-in-out infinite;
+  }
+
+  @keyframes pulse-border {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(88,166,255,0); }
+    50%       { box-shadow: 0 0 0 4px rgba(88,166,255,.1); }
+  }
+
+  h1 {
+    font-family: var(--mono);
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: #fff;
+    letter-spacing: -.02em;
+  }
+
+  .tagline {
+    color: var(--muted);
+    font-size: .95rem;
+    max-width: 540px;
+    margin-top: .5rem;
+  }
+
+  .badges {
+    display: flex;
+    gap: .5rem;
+    margin-top: 1.25rem;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    font-family: var(--mono);
+    font-size: .7rem;
+    font-weight: 500;
+    padding: .2rem .65rem;
+    border-radius: 2em;
+    border: 1px solid;
+    letter-spacing: .04em;
+  }
+  .badge.version { color: var(--accent); border-color: rgba(88,166,255,.3); background: rgba(88,166,255,.08); }
+  .badge.ok      { color: var(--ok);    border-color: rgba(63,185,80,.3);  background: rgba(63,185,80,.08); }
+  .badge.arch    { color: var(--muted); border-color: var(--border); background: rgba(255,255,255,.03); }
+
+  /* ── Sections ── */
+  section { padding: 2.5rem 0; border-bottom: 1px solid var(--border); }
+  section:last-child { border-bottom: none; }
+
+  h2 {
+    font-family: var(--mono);
+    font-size: .7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--accent);
+    margin-bottom: 1.25rem;
+  }
+
+  /* ── Step list ── */
+  .steps { display: flex; flex-direction: column; gap: 1.25rem; }
+
+  .step {
+    display: grid;
+    grid-template-columns: 2rem 1fr;
+    gap: .75rem;
+    align-items: start;
+  }
+
+  .step-num {
+    font-family: var(--mono);
+    font-size: .7rem;
+    font-weight: 600;
+    color: var(--accent);
+    background: rgba(88,166,255,.1);
+    border: 1px solid rgba(88,166,255,.2);
+    border-radius: 50%;
+    width: 1.75rem;
+    height: 1.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: .1rem;
+  }
+
+  .step-body {}
+  .step-label {
+    font-size: .85rem;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: .4rem;
+  }
+  .step-hint { font-size: .8rem; color: var(--muted); margin-top: .35rem; }
+
+  /* ── Code blocks ── */
+  .code-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .code-block-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .4rem .875rem;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,.02);
+  }
+
+  .code-block-hdr span {
+    font-family: var(--mono);
+    font-size: .65rem;
+    color: var(--muted);
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+
+  .copy-btn {
+    font-family: var(--mono);
+    font-size: .65rem;
+    color: var(--muted);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: .1rem .4rem;
+    border-radius: 4px;
+    transition: color .12s, background .12s;
+  }
+  .copy-btn:hover { color: var(--accent); background: rgba(88,166,255,.08); }
+  .copy-btn.copied { color: var(--ok); }
+
+  pre {
+    font-family: var(--mono);
+    font-size: .82rem;
+    line-height: 1.75;
+    color: var(--text);
+    padding: .875rem 1rem;
+    overflow-x: auto;
+  }
+
+  pre .c  { color: var(--muted); }
+  pre .kw { color: var(--accent); }
+  pre .st { color: #a5d6ff; }
+  pre .ok { color: var(--ok); }
+
+  /* ── Package table ── */
+  .pkg-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: .8rem;
+  }
+
+  .pkg-table th {
+    text-align: left;
+    font-size: .65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--muted);
+    padding: .4rem .75rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .pkg-table td {
+    padding: .6rem .75rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    vertical-align: middle;
+  }
+
+  .pkg-table tr:last-child td { border-bottom: none; }
+  .pkg-table tr:hover td { background: rgba(255,255,255,.02); }
+
+  .pkg-link {
+    color: var(--accent);
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+  }
+  .pkg-link:hover { text-decoration: underline; }
+  .pkg-link svg { opacity: .6; }
+
+  .pkg-desc { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
+
+  /* ── Info box ── */
+  .info-box {
+    background: rgba(88,166,255,.06);
+    border: 1px solid rgba(88,166,255,.2);
+    border-radius: 8px;
+    padding: .875rem 1rem;
+    font-size: .85rem;
+    color: var(--text);
+    display: flex;
+    gap: .75rem;
+    align-items: flex-start;
+  }
+  .info-box .icon { color: var(--accent); flex-shrink: 0; margin-top: .1rem; }
+
+  /* ── Footer ── */
+  footer {
+    padding: 2rem 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: .75rem;
+  }
+
+  footer a { color: var(--accent); text-decoration: none; font-size: .82rem; }
+  footer a:hover { text-decoration: underline; }
+  .footer-muted { font-size: .78rem; color: var(--muted); }
+
+  @media (max-width: 600px) {
+    h1 { font-size: 1.25rem; }
+    .step { grid-template-columns: 1.75rem 1fr; }
+    footer { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo-row">
+      <div class="logo-icon">OT</div>
+      <h1>OpenTether</h1>
+    </div>
+    <p class="tagline">Bridges Android devices running a SOCKS5 proxy to your OpenWrt router via ADB port forwarding and hev-socks5-tunnel. Multi-device, hotplug-automatic, LuCI-managed.</p>
+    <div class="badges">
+      <span class="badge version">v1.3.0-r1</span>
+      <span class="badge ok">OpenWrt 24+</span>
+      <span class="badge arch">PKGARCH all</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Install from this repository</h2>
+    <div class="steps">
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <div class="step-label">Add the signing key</div>
+          <div class="code-block">
+            <div class="code-block-hdr">
+              <span>router shell</span>
+              <button class="copy-btn" onclick="copy(this, 'curl -o /etc/apk/keys/opentether.pub https://helafaye.github.io/opentether/key-build.pub')">copy</button>
+            </div>
+            <pre><span class="kw">curl</span> -o /etc/apk/keys/opentether.pub \
+  https://helafaye.github.io/opentether/key-build.pub</pre>
+          </div>
+          <div class="step-hint">Only needed once. Persists across reboots.</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <div class="step-label">Add the repository</div>
+          <div class="code-block">
+            <div class="code-block-hdr">
+              <span>router shell</span>
+              <button class="copy-btn" onclick="copy(this, 'echo https://helafaye.github.io/opentether/packages/all >> /etc/apk/repositories')">copy</button>
+            </div>
+            <pre><span class="kw">echo</span> <span class="st">https://helafaye.github.io/opentether/packages/all</span> \
+  >> /etc/apk/repositories
+<span class="kw">apk</span> update</pre>
+          </div>
+          <div class="step-hint">Only needed once.</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <div class="step-label">Install</div>
+          <div class="code-block">
+            <div class="code-block-hdr">
+              <span>router shell</span>
+              <button class="copy-btn" onclick="copy(this, 'apk add opentether luci-app-opentether')">copy</button>
+            </div>
+            <pre><span class="kw">apk</span> add opentether luci-app-opentether</pre>
+          </div>
+          <div class="step-hint">Install <code>opentether</code> alone if you don't use LuCI.</div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="info-box" style="margin-top:1.5rem">
+      <span class="icon">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm.75 10.5h-1.5v-5h1.5v5zm0-6.5h-1.5V3.5h1.5V5z"/></svg>
+      </span>
+      <div>For OpenWrt 23.05 and earlier, use the <strong>.ipk</strong> files from the <a href="https://github.com/HelaFaye/opentether/releases" style="color:var(--accent)">GitHub release</a> with <code>opkg install</code>.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Packages</h2>
+    <div class="code-block">
+      <table class="pkg-table">
+        <thead>
+          <tr>
+            <th>Package</th>
+            <th>Version</th>
+            <th>Format</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <a class="pkg-link" href="packages/all/opentether-1.3.0-r1.apk">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2.75 14A1.75 1.75 0 011 12.25v-2.5a.75.75 0 011.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 00.25-.25v-2.5a.75.75 0 011.5 0v2.5A1.75 1.75 0 0113.25 14H2.75zM7.25 7.689V2a.75.75 0 011.5 0v5.689l1.97-1.97a.75.75 0 111.06 1.06L8 10.56 4.22 6.78a.75.75 0 111.06-1.06l1.97 1.97z"/></svg>
+                opentether
+              </a>
+              <div class="pkg-desc">Init service, hotplug, UCI config, opentether-check</div>
+            </td>
+            <td>1.3.0-r1</td>
+            <td>.apk</td>
+          </tr>
+          <tr>
+            <td>
+              <a class="pkg-link" href="packages/all/luci-app-opentether-1.3.0-r1.apk">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2.75 14A1.75 1.75 0 011 12.25v-2.5a.75.75 0 011.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 00.25-.25v-2.5a.75.75 0 011.5 0v2.5A1.75 1.75 0 0113.25 14H2.75zM7.25 7.689V2a.75.75 0 011.5 0v5.689l1.97-1.97a.75.75 0 111.06 1.06L8 10.56 4.22 6.78a.75.75 0 111.06-1.06l1.97 1.97z"/></svg>
+                luci-app-opentether
+              </a>
+              <div class="pkg-desc">LuCI web interface — status, config, YAML preview</div>
+            </td>
+            <td>1.3.0-r1</td>
+            <td>.apk</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Dependencies</h2>
+    <div class="code-block">
+      <div class="code-block-hdr"><span>router shell</span>
+        <button class="copy-btn" onclick="copy(this, 'apk add hev-socks5-tunnel adb curl kmod-ipt-ipopt')">copy</button>
+      </div>
+      <pre><span class="kw">apk</span> add hev-socks5-tunnel adb curl <span class="c"># required</span>
+<span class="kw">apk</span> add kmod-ipt-ipopt              <span class="c"># optional — for TTL mangling</span></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Links</h2>
+    <div style="display:flex;flex-direction:column;gap:.6rem;font-size:.875rem">
+      <a href="https://github.com/HelaFaye/opentether" style="color:var(--accent)">github.com/HelaFaye/opentether — source, issues, releases</a>
+      <a href="https://github.com/HelaFaye/luci-app-opentether" style="color:var(--accent)">github.com/HelaFaye/luci-app-opentether — LuCI source</a>
+      <a href="https://github.com/heiher/hev-socks5-tunnel" style="color:var(--accent)">github.com/heiher/hev-socks5-tunnel — tunnel backend</a>
+      <a href="https://github.com/heiher/socks5" style="color:var(--accent)">github.com/heiher/socks5 — recommended SOCKS5 app for Android</a>
+    </div>
+  </section>
+
+  <footer>
+    <div>
+      <a href="https://github.com/HelaFaye/opentether">HelaFaye/opentether</a>
+      <span class="footer-muted" style="margin-left:.75rem">MIT License</span>
+    </div>
+    <span class="footer-muted">v1.3.0-r1 · OpenWrt 24+</span>
+  </footer>
+
+</div>
+
+<script>
+function copy(btn, text) {
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'copied!';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = 'copy';
+      btn.classList.remove('copied');
+    }, 2000);
+  });
+}
+</script>
+</body>
+</html>
