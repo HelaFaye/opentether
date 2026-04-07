@@ -1,8 +1,8 @@
 # OpenTether
 
-OpenTether bridges any Android device running a SOCKS5 proxy to any OpenWrt router's WAN connection via ADB port forwarding and [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel). Once installed, simply plug in your device, approve the USB debugging prompt, and all LAN clients will route their traffic through the device's internet connection automatically — no manual configuration required after initial setup.
+OpenTether bridges any Android device running a SOCKS5 proxy to any OpenWrt router's WAN connection via ADB port forwarding and [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel). Once installed, plug in your device, approve the USB debugging prompt, and all LAN clients will route their traffic through the device's internet connection automatically — no manual configuration required after initial setup.
 
-Version 1.2.0 adds support for multiple devices simultaneously. Each device gets its own isolated tunnel interface, firewall zone, ADB forward, and procd service instance. Devices can be added, removed, enabled, and disabled independently through the LuCI web interface or via UCI on the command line.
+Multiple devices are supported simultaneously. Each device gets its own isolated tunnel interface, firewall zone, ADB forward, and procd service instance. Devices can be added, removed, enabled, and disabled independently through the LuCI web interface or via UCI on the command line.
 
 ## How it works
 
@@ -18,7 +18,7 @@ A watchdog process monitors the ADB connection, port forward, and tunnel process
 
 ## Multi-device support
 
-1.2.0 supports any number of Android devices connected simultaneously. Each device is registered independently and gets its own:
+Each registered device gets its own:
 
 - **UCI section** — `opentether.device_<serial>` storing all per-device configuration
 - **TUN interface** — a dedicated virtual network interface (e.g. `s5tun0`, `s5tun1`)
@@ -27,9 +27,7 @@ A watchdog process monitors the ADB connection, port forward, and tunnel process
 - **Firewall zone and forwarding rule** — isolated from other devices and from WAN
 - **Watchdog** — an independent background process monitoring the device's connection
 
-Devices are registered through the LuCI Configuration tab using the **Add Device** section, which scans for connected ADB devices and lets you register each one individually. Registered devices can be enabled or disabled without removing them — disabling a device stops its tunnel and prevents the hotplug script from starting it on reconnect, while preserving all configuration for later use.
-
-Route metrics control which device is preferred when multiple are active. Lower metric = higher priority. The default metric for the first device is 10; subsequent devices are assigned incrementally higher metrics. This can be changed per-device in the Configuration tab.
+Devices are registered through the LuCI Configuration tab using the **Add Device** section. Registered devices can be enabled or disabled without removing them. Route metrics control which device is preferred when multiple are active — lower metric = higher priority.
 
 ## Packages
 
@@ -43,11 +41,12 @@ Route metrics control which device is preferred when multiple are active. Lower 
 - `hev-socks5-tunnel`
 - `adb`
 - `curl`
+- `kmod-ipt-ipopt` *(optional — required for TTL mangling)*
 
 ## Building
 
 ```sh
-cp -r opentether /path/to/openwrt/package/
+ln -s /path/to/opentether /path/to/openwrt/package/opentether
 cd /path/to/openwrt
 make menuconfig   # select Network → opentether
 make package/opentether/compile V=s
@@ -55,19 +54,32 @@ make package/opentether/compile V=s
 
 ## Installing
 
-**apk (OpenWrt 24+ snapshot builds):**
+### Verified install (recommended)
+
+Add the OpenTether signing key to your router's trusted keys once, then install without `--allow-untrusted`:
+
 ```sh
-scp bin/packages/<arch>/base/opentether-*.apk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 "apk add --allow-untrusted /tmp/opentether-*.apk"
+# On your router — do this once
+curl -o /etc/apk/keys/opentether.pub \
+  https://raw.githubusercontent.com/HelaFaye/opentether/main/key-build.pub
+
+# Then install normally
+apk add /tmp/opentether-*.apk
 ```
 
-**opkg (OpenWrt stable releases):**
+### Unverified install
+
 ```sh
-scp bin/packages/<arch>/base/opentether-*.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 "opkg install /tmp/opentether-*.ipk"
+apk add --allow-untrusted /tmp/opentether-*.apk
 ```
 
-Replace `<arch>` with your router's CPU architecture. If you're not sure, run `uname -m` on the router to check.
+### opkg (OpenWrt 23.05 and earlier)
+
+```sh
+opkg install /tmp/opentether_*.ipk
+```
+
+Check your architecture first: `uname -m`. Replace `<arch>` in build output paths accordingly.
 
 ## Device setup
 
@@ -77,16 +89,12 @@ Enable USB debugging in Developer Options, plug into the router, and approve the
 
 ## Headless configuration (UCI)
 
-All settings are stored in `/etc/config/opentether` in per-device sections and can be configured without the web UI. Each device has its own section named after its ADB serial number.
-
-To register a new device from the command line:
+All settings are stored in `/etc/config/opentether` in per-device sections and can be configured without the web UI.
 
 ```sh
-# Replace ZY22KQ8RM2 with your device serial (run: adb devices)
+# Register a new device (replace ZY22KQ8RM2 with your serial — run: adb devices)
 /usr/lib/opentether/setup.sh add-device ZY22KQ8RM2 "My Device"
 ```
-
-To configure an existing device section directly:
 
 ```sh
 SERIAL=ZY22KQ8RM2
@@ -106,15 +114,37 @@ uci set opentether.device_${SERIAL}.ipv4='198.18.0.1'
 uci set opentether.device_${SERIAL}.ipv6='fc00::1'
 uci set opentether.device_${SERIAL}.metric='10'
 
+# TTL mangling (0 = disabled; 65 is a common bypass value)
+uci set opentether.device_${SERIAL}.ttl_mangle='0'
+
 # Apply — regenerates YAML and restarts tunnel instance
 uci commit opentether
 /usr/lib/opentether/setup.sh apply ${SERIAL}
 ```
 
-To remove a device:
+```sh
+# Remove a device
+/usr/lib/opentether/setup.sh remove-device ZY22KQ8RM2
+```
+
+## TTL mangling
+
+OpenTether can rewrite the TTL (IPv4) and hop limit (IPv6) of all outbound packets from a device's tunnel interface. This is useful for bypassing carrier tethering detection, which often flags packets with a TTL that differs from the phone's native value.
+
+Set `ttl_mangle` in the device's UCI section or via LuCI. Common values:
+
+| Value | Use case |
+|-------|----------|
+| `0` | Disabled (default) |
+| `64` | Standard Linux/Android TTL |
+| `65` | Common bypass — arrives at carrier as 64 after one hop |
+| `128` | Mimics Windows |
+| `255` | Maximum |
+
+Requires `kmod-ipt-ipopt` on the router:
 
 ```sh
-/usr/lib/opentether/setup.sh remove-device ZY22KQ8RM2
+apk add kmod-ipt-ipopt
 ```
 
 ## Diagnostics
@@ -123,3 +153,7 @@ To remove a device:
 opentether-check          # full per-device status: ADB, forward, tunnel, interface, routes, connectivity, DNS, log
 logread | grep opentether # raw log output
 ```
+
+## Legacy single-device support
+
+OpenTether 1.1.x provided a simpler single-device implementation. It is available on the `legacy/1.1.x` branch for users who need it, but is no longer actively developed.
