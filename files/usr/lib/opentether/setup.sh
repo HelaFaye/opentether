@@ -180,6 +180,7 @@ apply)
     generate_yaml
     uci set network.opentether.device="$(uget tunnel.name || echo s5tun0)"
     uci set network.opentether.ipaddr="$(uget tunnel.ipv4 || echo 198.18.0.1)"
+    uci set network.opentether.ip6addr="$(uget tunnel.ipv6 || echo fc00::1)/128"
     uci commit network
 
     ifdown opentether 2>/dev/null || true
