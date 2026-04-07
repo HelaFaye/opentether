@@ -14,6 +14,44 @@ MTU="$(uci -q get opentether.device_${SERIAL}.mtu    || echo 1440)"
 METRIC="$(uci -q get opentether.device_${SERIAL}.metric || echo 10)"
 IFACE="$(uci -q get opentether.device_${SERIAL}.iface  || echo s5tun0)"
 
+# ── TTL mangle helpers ────────────────────────────────────────────────────────
+_ttl_up() {
+    local serial="$1" iface="$2"
+    local ttl chain
+    ttl="$(uci -q get "opentether.device_${serial}.ttl_mangle" 2>/dev/null || echo 0)"
+    [ -z "$ttl" ] || [ "$ttl" = "0" ] && return 0
+    chain="ot_ttl_${serial}"
+
+    # IPv4
+    iptables  -t mangle -N "$chain"                             2>/dev/null || true
+    iptables  -t mangle -F "$chain"                             2>/dev/null || true
+    iptables  -t mangle -A "$chain" -j TTL --ttl-set "$ttl"    2>/dev/null || true
+    iptables  -t mangle -A POSTROUTING -o "$iface" -j "$chain" 2>/dev/null || true
+
+    # IPv6
+    ip6tables -t mangle -N "$chain"                             2>/dev/null || true
+    ip6tables -t mangle -F "$chain"                             2>/dev/null || true
+    ip6tables -t mangle -A "$chain" -j HL --hl-set "$ttl"      2>/dev/null || true
+    ip6tables -t mangle -A POSTROUTING -o "$iface" -j "$chain" 2>/dev/null || true
+
+    logger -t opentether "[$serial] TTL/HL mangle set to $ttl"
+}
+
+_ttl_down() {
+    local serial="$1" iface="$2"
+    local chain="ot_ttl_${serial}"
+
+    # IPv4
+    iptables  -t mangle -D POSTROUTING -o "$iface" -j "$chain" 2>/dev/null || true
+    iptables  -t mangle -F "$chain"                             2>/dev/null || true
+    iptables  -t mangle -X "$chain"                             2>/dev/null || true
+
+    # IPv6
+    ip6tables -t mangle -D POSTROUTING -o "$iface" -j "$chain" 2>/dev/null || true
+    ip6tables -t mangle -F "$chain"                             2>/dev/null || true
+    ip6tables -t mangle -X "$chain"                             2>/dev/null || true
+}
+
 if [ "$ACTION" = "ifup" ]; then
     logger -t opentether "[$SERIAL] Interface up — pinning routes (dev=$IFACE mtu=$MTU metric=$METRIC)"
 
@@ -29,10 +67,13 @@ if [ "$ACTION" = "ifup" ]; then
         printf 'nameserver 127.0.0.1\nnameserver ::1\n' > /etc/resolv.conf
     fi
 
+    _ttl_up "$SERIAL" "$IFACE"
+
     logger -t opentether "[$SERIAL] Routes and resolver pinned"
 
 elif [ "$ACTION" = "ifdown" ]; then
     logger -t opentether "[$SERIAL] Interface down — removing routes"
     ip route del default dev "$IFACE" 2>/dev/null || true
     ip -6 route del default dev "$IFACE" 2>/dev/null || true
+    _ttl_down "$SERIAL" "$IFACE"
 fi

@@ -161,6 +161,7 @@ add_device() {
     uci set "opentether.${section}.ipv4=${ipv4}"
     uci set "opentether.${section}.ipv6=${ipv6}"
     uci set "opentether.${section}.metric=10"
+    uci set "opentether.${section}.ttl_mangle=0"
     uci set "opentether.${section}.s5_address=127.0.0.1"
     uci set "opentether.${section}.s5_udp=tcp"
     uci set "opentether.${section}.md_address=127.0.0.1"
